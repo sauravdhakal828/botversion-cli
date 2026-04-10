@@ -1,0 +1,21 @@
+{
+  "name": "botversion-sdk",
+  "version": "1.0.0",
+  "description": "BotVersion SDK — auto-detect and register your API endpoints",
+  "main": "index.js",
+  "bin": {
+    "botversion-sdk": "bin/init.js"
+  },
+  "keywords": [
+    "botversion",
+    "sdk",
+    "ai",
+    "agent",
+    "api"
+  ],
+  "author": "Saurav Dhakal",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
