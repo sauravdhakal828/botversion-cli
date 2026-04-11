@@ -4,6 +4,7 @@ import threading
 import urllib.request
 import urllib.parse
 import urllib.error
+import atexit
 
 
 class BotVersionClient:
@@ -20,6 +21,7 @@ class BotVersionClient:
         self._queue = []
         self._flush_timer = None
         self._lock = threading.Lock()
+        atexit.register(self._flush)
 
     # ── Register endpoints (batched) ─────────────────────────────────────────
 
@@ -220,11 +222,11 @@ class BotVersionClient:
         """
         import asyncio
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._post, path, data)
 
     async def _get_async(self, path):
         import asyncio
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._get, path)

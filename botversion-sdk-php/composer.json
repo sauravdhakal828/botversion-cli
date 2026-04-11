@@ -11,19 +11,17 @@
     }
   ],
   "require": {
-    "php": ">=8.0"
-  },
-  "suggest": {
-    "laravel/framework": "Required for Laravel support"
+    "php": ">=8.0",
+    "laravel/framework": ">=9.0"
   },
   "autoload": {
-    "files": [
-      "Client.php",
-      "Scanner.php",
-      "Interceptor.php",
-      "BotVersion.php"
+    "classmap": [
+      "."
     ]
   },
+  "bin": [
+    "bin/botversion-init.php"
+  ],
   "keywords": [
     "botversion",
     "api",

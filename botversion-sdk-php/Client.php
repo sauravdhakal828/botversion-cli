@@ -72,8 +72,8 @@ class BotVersionClient
                 'workspaceKey' => $this->apiKey,
                 'method'       => $endpoint['method'] ?? null,
                 'path'         => $endpoint['path'] ?? null,
-                'requestBody'  => $endpoint['request_body'] ?? null,
-                'detectedBy'   => $endpoint['detected_by'] ?? 'runtime',
+                'requestBody'  => $endpoint['requestBody'] ?? $endpoint['request_body'] ?? null,
+                'detectedBy'   => $endpoint['detectedBy'] ?? $endpoint['detected_by'] ?? 'runtime',
             ]);
         } catch (\Exception $e) {
             if ($this->debug) {
@@ -102,8 +102,8 @@ class BotVersionClient
             'publicKey'       => $payload['publicKey'] ?? null,
             'query'           => $payload['message'] ?? '',
             'previousChats'   => $payload['conversationHistory'] ?? [],
-            'pageContext'      => $payload['pageContext'] ?? (object)[],
-            'userContext'      => $payload['userContext'] ?? (object)[],
+            'pageContext'     => $payload['pageContext']  ?: (object)[],
+            'userContext'     => $payload['userContext']  ?: (object)[],
         ]);
     }
 

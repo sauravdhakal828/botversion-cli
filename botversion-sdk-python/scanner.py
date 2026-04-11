@@ -36,20 +36,21 @@ def scan_fastapi_routes(app):
             methods = [m for m in route.methods if m not in ("HEAD", "OPTIONS")]
 
             for method in methods:
-                key = f"{method}:{path}"
+                normalized_path = re.sub(r"\{([^}]+)\}", r":\1", path)
+                key = f"{method}:{normalized_path}"
                 if key in seen:
                     continue
                 seen.add(key)
 
-                params = extract_path_params(path)
+                params = extract_path_params(normalized_path)
                 handler_name = getattr(route, "name", None) or getattr(
                     getattr(route, "endpoint", None), "__name__", None
                 )
 
                 endpoints.append({
                     "method": method,
-                    "path": path,
-                    "description": generate_description(method, path, handler_name),
+                    "path": normalized_path,
+                    "description": generate_description(method, normalized_path, handler_name),
                     "requestBody": build_param_schema(params) if method != "GET" and params else None,
                     "detectedBy": "static-scan",
                 })
@@ -220,7 +221,8 @@ def build_param_schema(params):
     Build a simple schema from path param names.
     Mirrors JS buildParamSchema()
     """
-    return {p: "string" for p in params}
+    properties = {p: {"type": "string"} for p in params}
+    return {"type": "object", "properties": properties}
 
 
 def generate_description(method, path, handler_name=None):

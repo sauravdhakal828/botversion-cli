@@ -84,6 +84,16 @@ def init(app=None, api_key=None, **options):
         else:
             print("[BotVersion SDK] Mode: Django (no app object)")
 
+    # ── Auto-detect framework FIRST ──────────────────────────────────────────
+    framework = _detect_framework(app)
+
+    if not framework:
+        print("[BotVersion SDK] ❌ Could not detect framework.")
+        print("[BotVersion SDK] ❌ Make sure FastAPI, Flask, or Django is installed.")
+        _initialized = False  # Reset so user can try again after fixing
+        return
+
+    # Only create client if framework is valid
     _client = BotVersionClient({
         "api_key": api_key,
         "platform_url": options.get("platform_url", "https://app.botversion.com"),
@@ -95,14 +105,6 @@ def init(app=None, api_key=None, **options):
     # Store globally so hot-reload can restore state
     builtins._botversion_client = _client
     builtins._botversion_options = _options
-
-    # ── Auto-detect framework ────────────────────────────────────────────────
-    framework = _detect_framework(app)
-
-    if not framework:
-        print("[BotVersion SDK] ❌ Could not detect framework.")
-        print("[BotVersion SDK] ❌ Make sure FastAPI, Flask, or Django is installed.")
-        return
 
     if debug:
         print(f"[BotVersion SDK] ✅ Framework detected: {framework}")
@@ -256,7 +258,11 @@ async def _handle_chat_fastapi(request):
     print(f"[BotVersion] chatbotId from body: {data.get('chatbotId')}")
 
     get_user_context = _options.get("get_user_context", None)
-    user_context = get_user_context(request) if get_user_context else extract_default_context(request, "fastapi")
+    if get_user_context:
+        from .interceptor import _process_user_context
+        user_context = _process_user_context(get_user_context(request))
+    else:
+        user_context = extract_default_context(request, "fastapi")
     print(f"[BotVersion] userContext being sent: {user_context}")
 
     try:
@@ -287,7 +293,11 @@ def _handle_chat_flask(request):
     print(f"[BotVersion] chatbotId from body: {data.get('chatbotId')}")
 
     get_user_context = _options.get("get_user_context", None)
-    user_context = get_user_context(request) if get_user_context else extract_default_context(request, "flask")
+    if get_user_context:
+        from .interceptor import _process_user_context
+        user_context = _process_user_context(get_user_context(request))
+    else:
+        user_context = extract_default_context(request, "flask")
     print(f"[BotVersion] userContext being sent: {user_context}")
 
     try:
@@ -322,7 +332,11 @@ def _handle_chat_django(request):
     print(f"[BotVersion] chatbotId from body: {data.get('chatbotId')}")
 
     get_user_context = _options.get("get_user_context", None)
-    user_context = get_user_context(request) if get_user_context else extract_default_context(request, "django")
+    if get_user_context:
+        from .interceptor import _process_user_context
+        user_context = _process_user_context(get_user_context(request))
+    else:
+        user_context = extract_default_context(request, "django")
     print(f"[BotVersion] userContext being sent: {user_context}")
 
     try:

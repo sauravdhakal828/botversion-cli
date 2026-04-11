@@ -138,6 +138,9 @@ class BotVersion
      */
     public static function chat($request, bool $executeTools = false)
     {
+        if (!function_exists('response')) {
+            throw new \RuntimeException("[BotVersion SDK] chat() requires Laravel.");
+        }
         if (!self::$client) {
             return response()->json(['error' => 'BotVersion SDK not initialized.'], 500);
         }
@@ -268,14 +271,16 @@ class BotVersion
         try {
             $interceptor = new BotVersionInterceptor(self::$client, $options);
 
-            app(\Illuminate\Contracts\Http\Kernel::class)
-                ->pushMiddleware(function ($request, $next) use ($interceptor) {
-                    return $interceptor->handle($request, $next);
-                });
+            // Bind the pre-built interceptor into the container
+            app()->instance(BotVersionInterceptor::class, $interceptor);
+
+            // Push as global middleware via the router instead of kernel
+            app(\Illuminate\Contracts\Http\Kernel::class)->appendMiddlewareToGroup('web', BotVersionInterceptor::class);
+            app(\Illuminate\Contracts\Http\Kernel::class)->appendMiddlewareToGroup('api', BotVersionInterceptor::class);
 
             if ($options['debug'] ?? false) {
                 error_log("[BotVersion SDK] ✅ Laravel middleware attached");
-            }
+                }
         } catch (\Exception $e) {
             error_log("[BotVersion SDK] ⚠ Failed to attach middleware: " . $e->getMessage());
         }

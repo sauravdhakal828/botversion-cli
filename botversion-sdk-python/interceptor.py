@@ -160,6 +160,10 @@ def attach_fastapi_interceptor(app, client, options):
                     if not options.get("api_prefix") or path.startswith(options["api_prefix"]):
                         try:
                             body_bytes = await request.body()
+                            # Cache body so the actual route handler can still read it
+                            async def receive():
+                                return {"type": "http.request", "body": body_bytes}
+                            request._receive = receive
                             body_data = _json.loads(body_bytes) if body_bytes else None
                             body_structure = build_body_structure(body_data)
                         except Exception:
@@ -280,7 +284,11 @@ def execute_agent_call(client, request, options, framework="fastapi"):
     Mirrors JS app.executeAgentCall() in interceptor.js
     """
     get_user_context = options.get("get_user_context", None)
-    user_context = get_user_context(request) if get_user_context else extract_default_context(request, framework)
+    if get_user_context:
+        raw = get_user_context(request)
+        user_context = _process_user_context(raw)
+    else:
+        user_context = extract_default_context(request, framework)
 
     data = _get_request_body(request, framework)
 
@@ -334,6 +342,64 @@ def _get_request_body(request, framework):
         pass
     return {}
 
+def _process_user_context(raw):
+    """
+    Takes whatever the user returned from get_user_context,
+    runs it through the same flatten + strip sensitive + smart alias
+    logic as extract_default_context.
+    So even custom user context functions are safe.
+    """
+    if not raw:
+        return {}
+
+    # If it's not a dict, try to convert it
+    if not isinstance(raw, dict):
+        try:
+            raw = {k: v for k, v in raw.__dict__.items() if not k.startswith("_")}
+        except Exception:
+            return {}
+
+    sensitive_keys = [
+        "password", "passwd", "pwd", "token", "accesstoken", "refreshtoken",
+        "bearertoken", "secret", "privatesecret", "apikey", "api_key",
+        "privatekey", "private_key", "signingkey", "hash", "passwordhash",
+        "salt", "cvv", "ssn", "pin", "creditcard", "credit_card",
+        "cardnumber", "card_number", "otp", "mfa", "totp",
+        "image", "avatar", "photo",
+    ]
+
+    # Step 1: Flatten
+    flat = _flatten_object(raw)
+
+    # Step 2: Strip sensitive keys
+    context = {}
+    for key, val in flat.items():
+        is_sensitive = any(s in key.lower() for s in sensitive_keys)
+        if not is_sensitive:
+            context[key] = val
+
+    # Step 3: Smart aliasing
+    id_suffixes = ["id", "key", "code", "ref", "slug", "uuid", "num", "no"]
+    clean_prefixes = ["active", "current", "selected", "default", "my", "the", "this"]
+
+    aliases = {}
+    for key, val in context.items():
+        lower_key = key.lower()
+        is_id_field = any(lower_key.endswith(suffix) for suffix in id_suffixes)
+
+        if is_id_field and val:
+            clean_key = key
+            for prefix in clean_prefixes:
+                if clean_key.lower().startswith(prefix):
+                    clean_key = clean_key[len(prefix):]
+                    clean_key = clean_key[0].lower() + clean_key[1:] if clean_key else clean_key
+                    break
+
+            if clean_key != key and clean_key not in context:
+                aliases[clean_key] = val
+
+    context.update(aliases)
+    return context
 
 def _make_local_call(request, call, framework):
     """

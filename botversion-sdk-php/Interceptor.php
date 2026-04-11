@@ -34,7 +34,9 @@ class BotVersionInterceptor
 
             if (!$apiPrefix || str_starts_with($path, $apiPrefix)) {
                 $normalizedPath = $this->normalizePath($path);
-                $bodyStructure  = $this->buildBodyStructure($request->all());
+                $bodyStructure = $method !== 'GET'
+                    ? $this->buildBodyStructure($request->except(['_token', '_method']))
+                    : null;
 
                 // Deduplicate by method:path:sorted-body-fields (same as JS)
                 // so new body fields on existing endpoints get re-reported
@@ -159,19 +161,23 @@ class BotVersionInterceptor
     }
 
     private function reportAsync(string $method, string $path, ?array $jsonSchema): void
-    {
-        // PHP is synchronous — report inline but catch all errors so we never crash the app
+{
+    $client = $this->client;
+    $debug = $this->options['debug'] ?? false;
+    
+    register_shutdown_function(function () use ($client, $method, $path, $jsonSchema, $debug) {
         try {
-            $this->client->updateEndpoint([
-                'method'       => $method,
-                'path'         => $path,
-                'request_body' => $jsonSchema,
-                'detected_by'  => 'runtime',
+            $client->updateEndpoint([
+                'method'      => $method,
+                'path'        => $path,
+                'requestBody' => $jsonSchema,
+                'detectedBy'  => 'runtime',
             ]);
         } catch (\Exception $e) {
-            if ($this->options['debug'] ?? false) {
+            if ($debug) {
                 error_log("[BotVersion SDK] ⚠ Failed to report endpoint: " . $e->getMessage());
             }
         }
-    }
+    });
+}
 }

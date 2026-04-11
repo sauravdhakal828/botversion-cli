@@ -12,12 +12,19 @@ class BotVersionScanner
         $seen      = [];
 
         try {
-            // Get all routes from Laravel's router
             $routes = app('router')->getRoutes();
 
             foreach ($routes as $route) {
                 $methods = $route->methods();
                 $path    = '/' . ltrim($route->uri(), '/');
+
+                // Skip internal Laravel/package routes
+                if (str_starts_with($path, '/_ignition') ||
+                    str_starts_with($path, '/sanctum') ||
+                    str_starts_with($path, '/telescope') ||
+                    str_starts_with($path, '/horizon')) {
+                    continue;
+                }
 
                 // Normalize Laravel path format {id} → :id
                 $normalizedPath = self::normalizeLaravelPath($path);
@@ -100,11 +107,14 @@ class BotVersionScanner
      */
     private static function buildParamSchema(array $params): array
     {
-        $schema = [];
+        $properties = [];
         foreach ($params as $param) {
-            $schema[$param] = 'string';
+            $properties[$param] = ['type' => 'string'];
         }
-        return $schema;
+        return [
+            'type'       => 'object',
+            'properties' => $properties,
+        ];
     }
 
     /**
@@ -113,7 +123,6 @@ class BotVersionScanner
     private static function generateDescription(string $method, string $path, ?string $handlerName): string
     {
         if ($handlerName) {
-            // Convert camelCase/snake_case to readable
             $name = preg_replace('/([A-Z])/', ' $1', $handlerName);
             $name = str_replace('_', ' ', $name);
             return ucwords(strtolower(trim($name)));
