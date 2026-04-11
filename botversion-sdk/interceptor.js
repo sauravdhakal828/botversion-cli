@@ -267,8 +267,8 @@ function makeLocalCall(req, call) {
     var lib = isHttps ? https : http;
 
     var options = {
-      hostname: req.hostname,
-      port: (req.socket && req.socket.localPort) || (isHttps ? 443 : 80),
+      hostname: "127.0.0.1",
+      port: process.env.PORT || 3000,
       path: call.path,
       method: call.method,
       headers: {

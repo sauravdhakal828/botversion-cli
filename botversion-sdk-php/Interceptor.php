@@ -34,15 +34,19 @@ class BotVersionInterceptor
 
             if (!$apiPrefix || str_starts_with($path, $apiPrefix)) {
                 $normalizedPath = $this->normalizePath($path);
-                $key            = $method . ':' . $normalizedPath;
+                $bodyStructure  = $this->buildBodyStructure($request->all());
 
-                if (!isset(self::$reported[$key])) {
-                    self::$reported[$key] = true;
+                // Deduplicate by method:path:sorted-body-fields (same as JS)
+                // so new body fields on existing endpoints get re-reported
+                $bodyKey = $method . ':' . $normalizedPath . ':'
+                    . implode(',', array_keys($bodyStructure ?? []));
 
-                    $bodyStructure = $this->buildBodyStructure($request->all());
+                if (!isset(self::$reported[$bodyKey])) {
+                    self::$reported[$bodyKey] = true;
 
-                    // Fire and forget — don't block the request
-                    $this->reportAsync($method, $normalizedPath, $bodyStructure);
+                    $jsonSchema = $this->toJsonSchema($bodyStructure);
+
+                    $this->reportAsync($method, $normalizedPath, $jsonSchema);
                 }
             }
         }
@@ -63,7 +67,7 @@ class BotVersionInterceptor
 
     private function normalizePath(string $path): string
     {
-        $segments = explode('/', $path);
+        $segments   = explode('/', $path);
         $normalized = [];
 
         foreach ($segments as $segment) {
@@ -71,6 +75,7 @@ class BotVersionInterceptor
                 $normalized[] = $segment;
                 continue;
             }
+
             // UUID
             if (preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $segment)) {
                 $normalized[] = ':id';
@@ -79,11 +84,15 @@ class BotVersionInterceptor
             elseif (preg_match('/^\d+$/', $segment)) {
                 $normalized[] = ':id';
             }
+            // cuid pattern (c + 20+ alphanumeric chars)
+            elseif (preg_match('/^c[a-z0-9]{20,}$/i', $segment)) {
+                $normalized[] = ':id';
+            }
             // MongoDB ObjectId
             elseif (preg_match('/^[0-9a-f]{24}$/i', $segment)) {
                 $normalized[] = ':id';
             }
-            // Long alphanumeric
+            // Long alphanumeric (likely an ID)
             elseif (strlen($segment) >= 16 && preg_match('/[a-zA-Z]/', $segment) && preg_match('/[0-9]/', $segment)) {
                 $normalized[] = ':id';
             }
@@ -129,15 +138,34 @@ class BotVersionInterceptor
         return $structure;
     }
 
-    private function reportAsync(string $method, string $path, ?array $bodyStructure): void
+    /**
+     * Convert flat body structure map to JSON Schema format (same as JS interceptor)
+     */
+    private function toJsonSchema(?array $bodyStructure): ?array
     {
-        // In PHP we can't easily spawn threads, so we report inline
-        // but catch all errors so we never crash the app
+        if (empty($bodyStructure)) return null;
+
+        $properties = [];
+        foreach ($bodyStructure as $key => $type) {
+            $properties[$key] = [
+                'type' => ($type === 'null' || $type === '[redacted]') ? 'string' : $type,
+            ];
+        }
+
+        return [
+            'type'       => 'object',
+            'properties' => $properties,
+        ];
+    }
+
+    private function reportAsync(string $method, string $path, ?array $jsonSchema): void
+    {
+        // PHP is synchronous — report inline but catch all errors so we never crash the app
         try {
             $this->client->updateEndpoint([
                 'method'       => $method,
                 'path'         => $path,
-                'request_body' => $bodyStructure,
+                'request_body' => $jsonSchema,
                 'detected_by'  => 'runtime',
             ]);
         } catch (\Exception $e) {

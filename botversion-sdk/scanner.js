@@ -8,6 +8,8 @@ function scanExpressRoutes(app) {
   const endpoints = [];
   const seen = new Set();
 
+  // Force Express to initialize its router if it hasn't yet
+  if (app.lazyrouter) app.lazyrouter();
   const router = app._router || app.router || (app.stack ? app : null);
 
   if (!router) {
@@ -325,35 +327,32 @@ function extractQueryFieldsFromFile(content) {
 function regexpToPath(regexp, keys) {
   if (!regexp) return "";
 
-  // Express stores the fast path string on the regexp object directly
-  if (regexp.source === "^\\/?(?=\\/|$)") return ""; // root mount, no prefix
+  // Express 4.x stores the original path string directly
+  if (regexp.source === "^\\/?(?=\\/|$)") return "";
 
-  // Try to extract a clean path from the regexp source
   try {
     var src = regexp.source;
 
-    // A plain string mount like app.use('/api/v1', ...) produces
-    // source: "^\\/api\\/v1\\/?(?=\\/|$)" — extract the prefix part
-    var match = src.match(/^\^\\\/(.+?)\\\/\?\(\?=\\\/\|\$\)$/);
-    if (match) {
-      return "/" + match[1].replace(/\\\//g, "/");
-    }
+    // Remove anchors and cleanup
+    src = src
+      .replace(/^\^/, "")
+      .replace(/\\\//g, "/")
+      .replace(/\/\?\(\?=\/\|\$\)$/, "")
+      .replace(/\/\?\$?$/, "")
+      .replace(/\(\?:\(\[\^\/\]\+\?\)\)/g, function (_, i) {
+        return keys && keys[i] ? ":" + keys[i].name : ":param";
+      });
 
-    // Simpler pattern: "^\\/api\\/?(?=\\/|$)"
-    var match2 = src.match(/^\^(\\.+?)\\\/\?\(\?=\\\/\|\$\)$/);
-    if (match2) {
-      return match2[1].replace(/\\\//g, "/");
-    }
+    // Clean up any remaining regex artifacts
+    src = src.replace(/\(\?:/g, "").replace(/\)/g, "");
+
+    if (!src || src === "/") return "";
+    if (!src.startsWith("/")) src = "/" + src;
+
+    return src;
   } catch (e) {
-    // ignore
+    return "";
   }
-
-  // If keys exist, fall back to building from keys (parameterised mount — rare)
-  if (keys && keys.length > 0) {
-    return "/:param";
-  }
-
-  return "";
 }
 
 module.exports = {

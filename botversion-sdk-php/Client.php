@@ -10,15 +10,13 @@ class BotVersionClient
     private $debug;
     private $timeout;
     private $queue = [];
-    private $flushDelay;
 
     public function __construct(array $options)
     {
         $this->apiKey      = $options['api_key'];
-        $this->platformUrl = $options['platform_url'] ?? 'https://app.botversion.com';
+        $this->platformUrl = rtrim($options['platform_url'] ?? 'https://app.botversion.com', '/');
         $this->debug       = $options['debug'] ?? false;
         $this->timeout     = $options['timeout'] ?? 5;
-        $this->flushDelay  = $options['flush_delay'] ?? 3;
     }
 
     // ── Register endpoints (batched) ─────────────────────────────────────────
@@ -91,6 +89,35 @@ class BotVersionClient
         return $this->get('/api/sdk/get-endpoints?workspaceKey=' . urlencode($this->apiKey));
     }
 
+    // ── Agent chat ───────────────────────────────────────────────────────────
+
+    public function agentChat(array $payload): array
+    {
+        if ($this->debug) {
+            error_log("[BotVersion] agentChat payload: " . json_encode($payload));
+        }
+
+        return $this->post('/api/chatbot/widget-chat', [
+            'chatbotId'       => $payload['chatbotId'] ?? null,
+            'publicKey'       => $payload['publicKey'] ?? null,
+            'query'           => $payload['message'] ?? '',
+            'previousChats'   => $payload['conversationHistory'] ?? [],
+            'pageContext'      => $payload['pageContext'] ?? (object)[],
+            'userContext'      => $payload['userContext'] ?? (object)[],
+        ]);
+    }
+
+    // ── Agent tool result ─────────────────────────────────────────────────────
+
+    public function agentToolResult(string $sessionToken, array $result, $sessionData = null): array
+    {
+        return $this->post('/api/sdk/agent-tool-result', [
+            'sessionToken' => $sessionToken,
+            'sessionData'  => $sessionData,
+            'result'       => $result,
+        ]);
+    }
+
     // ── HTTP helpers ─────────────────────────────────────────────────────────
 
     private function post(string $path, array $data): array
@@ -100,14 +127,14 @@ class BotVersionClient
 
         $context = stream_context_create([
             'http' => [
-                'method'  => 'POST',
-                'header'  => implode("\r\n", [
+                'method'        => 'POST',
+                'header'        => implode("\r\n", [
                     'Content-Type: application/json',
                     'Content-Length: ' . strlen($body),
                     'X-BotVersion-SDK: ' . self::SDK_VERSION,
                 ]),
-                'content' => $body,
-                'timeout' => $this->timeout,
+                'content'       => $body,
+                'timeout'       => $this->timeout,
                 'ignore_errors' => true,
             ],
         ]);
@@ -115,13 +142,23 @@ class BotVersionClient
         $response = file_get_contents($url, false, $context);
 
         if ($response === false) {
-            throw new \RuntimeException("Request to platform failed");
+            throw new \RuntimeException("Request to platform failed: " . $url);
         }
+
+        // Check HTTP status code
+        $statusLine = $http_response_header[0] ?? '';
+        preg_match('/HTTP\/\S+\s+(\d+)/', $statusLine, $matches);
+        $statusCode = (int)($matches[1] ?? 200);
 
         $parsed = json_decode($response, true);
 
         if (json_last_error() !== JSON_ERROR_NONE) {
             throw new \RuntimeException("Invalid JSON response from platform");
+        }
+
+        if ($statusCode < 200 || $statusCode >= 300) {
+            $errorMsg = $parsed['error'] ?? $response;
+            throw new \RuntimeException("Platform returned {$statusCode}: {$errorMsg}");
         }
 
         return $parsed;
@@ -133,9 +170,9 @@ class BotVersionClient
 
         $context = stream_context_create([
             'http' => [
-                'method'  => 'GET',
-                'header'  => 'X-BotVersion-SDK: ' . self::SDK_VERSION,
-                'timeout' => $this->timeout,
+                'method'        => 'GET',
+                'header'        => 'X-BotVersion-SDK: ' . self::SDK_VERSION,
+                'timeout'       => $this->timeout,
                 'ignore_errors' => true,
             ],
         ]);
@@ -143,13 +180,23 @@ class BotVersionClient
         $response = file_get_contents($url, false, $context);
 
         if ($response === false) {
-            throw new \RuntimeException("Request to platform failed");
+            throw new \RuntimeException("Request to platform failed: " . $url);
         }
+
+        // Check HTTP status code
+        $statusLine = $http_response_header[0] ?? '';
+        preg_match('/HTTP\/\S+\s+(\d+)/', $statusLine, $matches);
+        $statusCode = (int)($matches[1] ?? 200);
 
         $parsed = json_decode($response, true);
 
         if (json_last_error() !== JSON_ERROR_NONE) {
             throw new \RuntimeException("Invalid JSON response from platform");
+        }
+
+        if ($statusCode < 200 || $statusCode >= 300) {
+            $errorMsg = $parsed['error'] ?? $response;
+            throw new \RuntimeException("Platform returned {$statusCode}: {$errorMsg}");
         }
 
         return $parsed;

@@ -1,14 +1,17 @@
 // botversion-sdk/cli/generator.js
-
 "use strict";
 
 const path = require("path");
+const fs = require("fs");
 
-// ─── EXPRESS CODE GENERATION ─────────────────────────────────────────────────
+// ─── EXPRESS CODE GENERATION ──────────────────────────────────────────────────
 
 function generateExpressInit(info, apiKey) {
   const { moduleSystem, isTypeScript, auth } = info;
   const isESM = moduleSystem === "esm";
+
+  // FIX #2: Detect the actual app variable name used in the entry file
+  const appVarName = info.appVarName || "app";
 
   const importLine = isESM
     ? `import BotVersion from 'botversion-sdk';`
@@ -20,11 +23,11 @@ function generateExpressInit(info, apiKey) {
 // BotVersion AI Agent — auto-added by botversion-sdk init
 ${importLine}
 
-BotVersion.init(app, {
-  apiKey: '${apiKey}',${getUserContext.option}
+BotVersion.init(${appVarName}, {
+  apiKey: process.env.BOTVERSION_API_KEY,
 });
 
-app.post('/api/botversion/chat', (req, res) => {
+${appVarName}.post('/api/botversion/chat', (req, res) => {
   BotVersion.chat(req, res);
 });
 `;
@@ -96,30 +99,54 @@ function generateExpressUserContext(auth) {
   }
 }
 
-// ─── NEXT.JS LIB FILE GENERATION ─────────────────────────────────────────────
+// ─── NEXT.JS INSTRUMENTATION FILE ────────────────────────────────────────────
+
 function generateInstrumentationFile(info, apiKey) {
-  const pagesDir = info.next?.srcDir
-    ? `path.join(process.cwd(), 'src', 'pages')`
-    : `path.join(process.cwd(), 'pages')`;
+  const { next, moduleSystem } = info;
+
+  // FIX #3: Only include pagesDir if Pages Router actually exists
+  // FIX #8: Use dynamic import instead of require() to support ESM projects
+  const hasPagesRouter = next?.pagesRouter;
+  const hasAppRouter = next?.appRouter;
+
+  const pagesDirLine = hasPagesRouter
+    ? next?.srcDir
+      ? `path.join(process.cwd(), 'src', 'pages')`
+      : `path.join(process.cwd(), 'pages')`
+    : null;
+
+  const appDirLine = hasAppRouter
+    ? next?.srcDir
+      ? `path.join(process.cwd(), 'src', 'app')`
+      : `path.join(process.cwd(), 'app')`
+    : null;
+
+  // Build pagesDir option only if Pages Router exists
+  const pagesDirOption = pagesDirLine
+    ? `\n      pagesDir: ${pagesDirLine},`
+    : "";
+
+  // Build appDir option only if App Router exists (for future scanner support)
+  const appDirOption = appDirLine ? `\n      appDir: ${appDirLine},` : "";
 
   return `export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
-    const BotVersion = require('botversion-sdk');
-    const path = require('path');
+    // FIX: Use dynamic import to support both CJS and ESM projects
+    const { default: BotVersion } = await import('botversion-sdk');
+    const { default: path } = await import('path');
+
     BotVersion.init({
-      apiKey: process.env.BOTVERSION_API_KEY,
-      pagesDir: ${pagesDir},
+      apiKey: process.env.BOTVERSION_API_KEY,${pagesDirOption}${appDirOption}
     });
   }
 }
 `;
 }
 
-// ─── NEXT.JS CHAT ROUTE — PAGES ROUTER ──────────────────────────────────────
+// ─── NEXT.JS CHAT ROUTE — PAGES ROUTER ───────────────────────────────────────
 
 function generateNextPagesChatRoute(info) {
-  const { auth, isTypeScript, nextAuthConfig, moduleSystem } = info;
-  const isESM = moduleSystem === "esm";
+  const { auth } = info;
 
   switch (auth.name) {
     case "next-auth":
@@ -137,18 +164,10 @@ function generateNextAuthPagesRoute(info) {
   const { nextAuthConfig, auth, next, generateTs } = info;
   const isV5 = auth.version === "v5";
 
-  // The chat file lives at: {base}/pages/api/botversion/chat.js
-  // We need the import path relative to THAT file
-  const chatFileDir = path.join(
-    next.baseDir, // handles src/ automatically
-    "pages",
-    "api",
-    "botversion",
-  );
+  // Compute correct relative import path for authOptions
+  const chatFileDir = path.join(next.baseDir, "pages", "api", "botversion");
 
-  // Determine the import path for authOptions
   let authImportPath = "../auth/[...nextauth]";
-
   if (nextAuthConfig) {
     const rel = path
       .relative(chatFileDir, nextAuthConfig.path)
@@ -168,8 +187,7 @@ export default BotVersion.nextHandler({
 `;
   }
 
-  // generateTs: user has allowJs:false — generate proper TypeScript
-  if (info.generateTs) {
+  if (generateTs) {
     return `import BotVersion from 'botversion-sdk';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '${authImportPath}';
@@ -184,7 +202,6 @@ export default BotVersion.nextHandler({
 `;
   }
 
-  // Plain JS — works for all standard Next.js projects
   return `import BotVersion from 'botversion-sdk';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '${authImportPath}';
@@ -233,9 +250,7 @@ function generateAuthlessPagesRoute(info) {
 
   const comment =
     auth.name && !auth.supported
-      ? `// TODO: We detected ${auth.name} but don't have automatic support yet.
-// Add your own getSession below to pass user context to the agent.
-// See: https://docs.botversion.com/auth\n`
+      ? `// TODO: We detected ${auth.name} but don't have automatic support yet.\n// Add your own getSession below to pass user context to the agent.\n// See: https://docs.botversion.com/auth\n`
       : "";
 
   if (isTypeScript) {
@@ -269,7 +284,7 @@ export default BotVersion.nextHandler({
 // ─── NEXT.JS CHAT ROUTE — APP ROUTER ─────────────────────────────────────────
 
 function generateNextAppChatRoute(info) {
-  const { auth, isTypeScript } = info;
+  const { auth } = info;
 
   switch (auth.name) {
     case "next-auth":
@@ -284,118 +299,282 @@ function generateNextAppChatRoute(info) {
 }
 
 function generateNextAuthAppRoute(info) {
-  const { auth, isTypeScript } = info;
+  const { auth, isTypeScript, next, nextAuthConfig } = info;
   const isV5 = auth.version === "v5";
+
+  // FIX #5: Compute the correct relative import path instead of hardcoding @/lib/auth
+  const chatFileDir = path.join(
+    next.baseDir,
+    "app",
+    "api",
+    "botversion",
+    "chat",
+  );
+
+  let authImportPath = "@/lib/auth"; // fallback alias
+  if (nextAuthConfig) {
+    const rel = path
+      .relative(chatFileDir, nextAuthConfig.path)
+      .replace(/\\/g, "/")
+      .replace(/\.(js|ts)$/, "");
+    authImportPath = rel.startsWith(".") ? rel : "./" + rel;
+  }
+
+  const typeAnnotation = isTypeScript ? ": NextRequest" : "";
+  const nextRequestImport = isTypeScript
+    ? `import { NextRequest, NextResponse } from 'next/server';\n`
+    : `import { NextResponse } from 'next/server';\n`;
 
   if (isV5) {
     return `import BotVersion from 'botversion-sdk';
-import { auth } from '@/auth';
-import { NextRequest } from 'next/server';
+import { auth } from '${authImportPath}';
+${nextRequestImport}
+// FIX #1: appRouterHandler is implemented here directly since App Router
+// does not support the nextHandler() Pages pattern
+export async function POST(req${typeAnnotation}) {
+  try {
+    const session = await auth();
+    const body = await req.json();
 
-export async function POST(req${isTypeScript ? ": NextRequest" : ""}) {
-  const session = await auth();
-  const body = await req.json();
+    const result = await BotVersion.nextHandler({
+      apiKey: process.env.BOTVERSION_API_KEY,
+      getSession: async () => session,
+    })({ ...req, body }, { json: (d) => d, status: () => ({ json: (d) => d }) });
 
-  return BotVersion.appRouterHandler({
-    body,
-    userContext: {
-      userId: session?.user?.id,
-      email: session?.user?.email,
-      name: session?.user?.name,
-    },
-  });
+    return NextResponse.json(result);
+  } catch (err) {
+    console.error('[BotVersion] App Router handler error:', err);
+    return NextResponse.json({ error: 'Agent error' }, { status: 500 });
+  }
 }
 `;
   }
 
   return `import BotVersion from 'botversion-sdk';
 import { getServerSession } from 'next-auth';
-import { authOptions } from '@/lib/auth';
-import { NextRequest } from 'next/server';
+import { authOptions } from '${authImportPath}';
+${nextRequestImport}
+export async function POST(req${typeAnnotation}) {
+  try {
+    const session = await getServerSession(authOptions);
+    const body = await req.json();
 
-export async function POST(req${isTypeScript ? ": NextRequest" : ""}) {
-  const session = await getServerSession(authOptions);
-  const body = await req.json();
-
-  return BotVersion.appRouterHandler({
-    body,
-    userContext: {
+    const userContext = {
       userId: session?.user?.id,
       email: session?.user?.email,
       name: session?.user?.name,
-    },
-  });
+    };
+
+    // Forward to BotVersion platform directly
+    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'https://chatbusiness-two.vercel.app'}/api/chatbot/widget-chat\`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chatbotId: body.chatbotId,
+        publicKey: body.publicKey,
+        query: body.message,
+        previousChats: body.conversationHistory || [],
+        pageContext: body.pageContext || {},
+        userContext,
+      }),
+    });
+
+    const data = await response.json();
+    return NextResponse.json(data);
+  } catch (err) {
+    console.error('[BotVersion] App Router handler error:', err);
+    return NextResponse.json({ error: 'Agent error' }, { status: 500 });
+  }
 }
 `;
 }
 
 function generateClerkAppRoute(info) {
-  const { auth, isTypeScript } = info;
+  const { isTypeScript } = info;
+  const typeAnnotation = isTypeScript ? ": NextRequest" : "";
+  const nextRequestImport = isTypeScript
+    ? `import { NextRequest, NextResponse } from 'next/server';\n`
+    : `import { NextResponse } from 'next/server';\n`;
 
   return `import BotVersion from 'botversion-sdk';
 import { auth } from '@clerk/nextjs/server';
-import { NextRequest } from 'next/server';
+${nextRequestImport}
+export async function POST(req${typeAnnotation}) {
+  try {
+    // FIX #6: auth() is async in Clerk v5+ — must be awaited
+    const { userId } = await auth();
+    const body = await req.json();
 
-export async function POST(req${isTypeScript ? ": NextRequest" : ""}) {
-  const { userId } = auth();
-  const body = await req.json();
+    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'https://chatbusiness-two.vercel.app'}/api/chatbot/widget-chat\`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chatbotId: body.chatbotId,
+        publicKey: body.publicKey,
+        query: body.message,
+        previousChats: body.conversationHistory || [],
+        pageContext: body.pageContext || {},
+        userContext: { userId },
+      }),
+    });
 
-  return BotVersion.appRouterHandler({
-    body,
-    userContext: { userId },
-  });
+    const data = await response.json();
+    return NextResponse.json(data);
+  } catch (err) {
+    console.error('[BotVersion] App Router handler error:', err);
+    return NextResponse.json({ error: 'Agent error' }, { status: 500 });
+  }
 }
 `;
 }
 
 function generateSupabaseAppRoute(info) {
   const { isTypeScript } = info;
+  const typeAnnotation = isTypeScript ? ": NextRequest" : "";
+  const nextRequestImport = isTypeScript
+    ? `import { NextRequest, NextResponse } from 'next/server';\n`
+    : `import { NextResponse } from 'next/server';\n`;
 
-  return `import BotVersion from 'botversion-sdk';
-import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs';
+  return `import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs';
 import { cookies } from 'next/headers';
-import { NextRequest } from 'next/server';
+${nextRequestImport}
+export async function POST(req${typeAnnotation}) {
+  try {
+    const supabase = createRouteHandlerClient({ cookies });
+    const { data: { session } } = await supabase.auth.getSession();
+    const body = await req.json();
 
-export async function POST(req${isTypeScript ? ": NextRequest" : ""}) {
-  const supabase = createRouteHandlerClient({ cookies });
-  const { data: { session } } = await supabase.auth.getSession();
-  const body = await req.json();
+    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'https://chatbusiness-two.vercel.app'}/api/chatbot/widget-chat\`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chatbotId: body.chatbotId,
+        publicKey: body.publicKey,
+        query: body.message,
+        previousChats: body.conversationHistory || [],
+        pageContext: body.pageContext || {},
+        userContext: {
+          userId: session?.user?.id,
+          email: session?.user?.email,
+        },
+      }),
+    });
 
-  return BotVersion.appRouterHandler({
-    body,
-    userContext: {
-      userId: session?.user?.id,
-      email: session?.user?.email,
-    },
-  });
+    const data = await response.json();
+    return NextResponse.json(data);
+  } catch (err) {
+    console.error('[BotVersion] App Router handler error:', err);
+    return NextResponse.json({ error: 'Agent error' }, { status: 500 });
+  }
 }
 `;
 }
 
 function generateAuthlessAppRoute(info) {
   const { auth, isTypeScript } = info;
+  const typeAnnotation = isTypeScript ? ": NextRequest" : "";
+  const nextRequestImport = isTypeScript
+    ? `import { NextRequest, NextResponse } from 'next/server';\n`
+    : `import { NextResponse } from 'next/server';\n`;
 
   const comment =
     auth.name && !auth.supported
-      ? `// TODO: We detected ${auth.name} but don't have automatic support yet.
-// Add your own user context below.
-// See: https://docs.botversion.com/auth\n\n`
+      ? `// TODO: We detected ${auth.name} but don't have automatic support yet.\n// Add your own user context below.\n// See: https://docs.botversion.com/auth\n\n`
       : "";
 
-  return `${comment}import BotVersion from 'botversion-sdk';
-import { NextRequest } from 'next/server';
+  return `${comment}${nextRequestImport}
+export async function POST(req${typeAnnotation}) {
+  try {
+    const body = await req.json();
 
-export async function POST(req${isTypeScript ? ": NextRequest" : ""}) {
-  const body = await req.json();
+    // No auth detected — agent works without user context
+    // Add userContext here if needed:
+    // const userContext = { userId: '...', email: '...' };
 
-  // No auth detected — agent works without user context
-  // Add userContext here if needed
-  return BotVersion.appRouterHandler({ body });
+    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'https://chatbusiness-two.vercel.app'}/api/chatbot/widget-chat\`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chatbotId: body.chatbotId,
+        publicKey: body.publicKey,
+        query: body.message,
+        previousChats: body.conversationHistory || [],
+        pageContext: body.pageContext || {},
+        userContext: {},
+      }),
+    });
+
+    const data = await response.json();
+    return NextResponse.json(data);
+  } catch (err) {
+    console.error('[BotVersion] App Router handler error:', err);
+    return NextResponse.json({ error: 'Agent error' }, { status: 500 });
+  }
 }
 `;
 }
 
-// ─── MANUAL INSTRUCTIONS FOR UNSUPPORTED CASES ───────────────────────────────
+// ─── NEXT.JS CONFIG PATCH ─────────────────────────────────────────────────────
+
+function generateNextConfigPatch(cwd) {
+  const candidates = ["next.config.js", "next.config.mjs", "next.config.ts"];
+
+  let configPath = null;
+  let configContent = null;
+
+  for (const candidate of candidates) {
+    const fullPath = path.join(cwd, candidate);
+    if (fs.existsSync(fullPath)) {
+      configPath = fullPath;
+      configContent = fs.readFileSync(fullPath, "utf8");
+      break;
+    }
+  }
+
+  if (!configPath) return null;
+
+  if (configContent.includes("instrumentationHook")) {
+    return { path: configPath, alreadyPatched: true };
+  }
+
+  let patched = configContent;
+
+  // Add to existing experimental block
+  if (configContent.includes("experimental")) {
+    patched = configContent.replace(
+      /experimental\s*:\s*\{/,
+      "experimental: {\n    instrumentationHook: true,",
+    );
+
+    // FIX #7: Handle next.config.mjs style — export default { ... }
+  } else if (/export\s+default\s+\{/.test(configContent)) {
+    patched = configContent.replace(
+      /export\s+default\s+\{/,
+      "export default {\n  experimental: {\n    instrumentationHook: true,\n  },",
+    );
+
+    // Handle const nextConfig = { ... } style (next.config.js)
+  } else if (/const\s+nextConfig\s*=\s*\{/.test(configContent)) {
+    patched = configContent.replace(
+      /const\s+nextConfig\s*=\s*\{/,
+      "const nextConfig = {\n  experimental: {\n    instrumentationHook: true,\n  },",
+    );
+
+    // Handle module.exports = { ... } style
+  } else if (/module\.exports\s*=\s*\{/.test(configContent)) {
+    patched = configContent.replace(
+      /module\.exports\s*=\s*\{/,
+      "module.exports = {\n  experimental: {\n    instrumentationHook: true,\n  },",
+    );
+  } else {
+    // Cannot safely patch — return null so caller prompts manual step
+    return null;
+  }
+
+  return { path: configPath, content: patched, alreadyPatched: false };
+}
+
+// ─── MANUAL INSTRUCTIONS FOR UNSUPPORTED FRAMEWORKS ──────────────────────────
 
 function generateManualInstructions(framework, apiKey) {
   const instructions = {
@@ -429,49 +608,6 @@ This framework is not yet supported automatically.
 Visit https://docs.botversion.com for manual setup instructions.
 `
   );
-}
-
-function generateNextConfigPatch(cwd) {
-  const fs = require("fs");
-  const path = require("path");
-
-  const candidates = ["next.config.js", "next.config.mjs", "next.config.ts"];
-
-  let configPath = null;
-  let configContent = null;
-
-  for (const candidate of candidates) {
-    const fullPath = path.join(cwd, candidate);
-    if (fs.existsSync(fullPath)) {
-      configPath = fullPath;
-      configContent = fs.readFileSync(fullPath, "utf8");
-      break;
-    }
-  }
-
-  if (!configPath) return null;
-
-  // Already has instrumentationHook
-  if (configContent.includes("instrumentationHook")) {
-    return { path: configPath, alreadyPatched: true };
-  }
-
-  // Add instrumentationHook: true to experimental block if exists
-  if (configContent.includes("experimental")) {
-    const patched = configContent.replace(
-      /experimental\s*:\s*\{/,
-      "experimental: {\n    instrumentationHook: true,",
-    );
-    return { path: configPath, content: patched, alreadyPatched: false };
-  }
-
-  // Add experimental block before the closing of config object
-  const patched = configContent.replace(
-    /const nextConfig\s*=\s*\{/,
-    "const nextConfig = {\n  experimental: {\n    instrumentationHook: true,\n  },",
-  );
-
-  return { path: configPath, content: patched, alreadyPatched: false };
 }
 
 module.exports = {

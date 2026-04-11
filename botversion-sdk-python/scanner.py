@@ -4,8 +4,8 @@ import re
 
 def scan_routes(app, framework):
     """
-    Entry point — delegates to the correct scanner
-    based on detected framework
+    Entry point — delegates to the correct scanner based on detected framework.
+    Mirrors JS scanner.scanExpressRoutes() / scanNextJsRoutes()
     """
     if framework == "fastapi":
         return scan_fastapi_routes(app)
@@ -24,11 +24,15 @@ def scan_fastapi_routes(app):
 
     try:
         for route in app.routes:
-            # Skip non-API routes (static files, docs, etc.)
+            # Skip non-API routes (static files, docs, websockets, etc.)
             if not hasattr(route, "methods") or not route.methods:
                 continue
 
             path = route.path
+            # Skip docs/openapi
+            if path in ("/docs", "/redoc", "/openapi.json"):
+                continue
+
             methods = [m for m in route.methods if m not in ("HEAD", "OPTIONS")]
 
             for method in methods:
@@ -38,13 +42,18 @@ def scan_fastapi_routes(app):
                 seen.add(key)
 
                 params = extract_path_params(path)
+                handler_name = getattr(route, "name", None) or getattr(
+                    getattr(route, "endpoint", None), "__name__", None
+                )
+
                 endpoints.append({
                     "method": method,
                     "path": path,
-                    "description": generate_description(method, path, getattr(route, "name", None)),
+                    "description": generate_description(method, path, handler_name),
                     "requestBody": build_param_schema(params) if method != "GET" and params else None,
                     "detectedBy": "static-scan",
                 })
+
     except Exception as e:
         print(f"[BotVersion SDK] ⚠ FastAPI scan error: {e}")
 
@@ -76,13 +85,19 @@ def scan_flask_routes(app):
                 seen.add(key)
 
                 params = extract_path_params(path)
+
+                # Try to get the handler function name for description
+                handler_fn = app.view_functions.get(rule.endpoint)
+                handler_name = getattr(handler_fn, "__name__", rule.endpoint)
+
                 endpoints.append({
                     "method": method,
                     "path": path,
-                    "description": generate_description(method, path, rule.endpoint),
+                    "description": generate_description(method, path, handler_name),
                     "requestBody": build_param_schema(params) if method != "GET" and params else None,
                     "detectedBy": "static-scan",
                 })
+
     except Exception as e:
         print(f"[BotVersion SDK] ⚠ Flask scan error: {e}")
 
@@ -108,19 +123,20 @@ def scan_django_routes():
 
 
 def _walk_django_patterns(patterns, prefix, endpoints, seen):
-    from django.urls.resolvers import URLPattern, URLResolver
+    try:
+        from django.urls.resolvers import URLPattern, URLResolver
+    except ImportError:
+        return
 
     for pattern in patterns:
         if isinstance(pattern, URLResolver):
-            # Nested URL conf — recurse
             sub_prefix = prefix + _django_pattern_to_path(str(pattern.pattern))
             _walk_django_patterns(pattern.url_patterns, sub_prefix, endpoints, seen)
 
         elif isinstance(pattern, URLPattern):
             path = prefix + _django_pattern_to_path(str(pattern.pattern))
-
-            # Try to detect methods from the view
             methods = _detect_django_methods(pattern.callback)
+            handler_name = getattr(pattern.callback, "__name__", None)
 
             for method in methods:
                 key = f"{method}:{path}"
@@ -132,7 +148,7 @@ def _walk_django_patterns(patterns, prefix, endpoints, seen):
                 endpoints.append({
                     "method": method,
                     "path": path,
-                    "description": generate_description(method, path, getattr(pattern.callback, "__name__", None)),
+                    "description": generate_description(method, path, handler_name),
                     "requestBody": build_param_schema(params) if method != "GET" and params else None,
                     "detectedBy": "static-scan",
                 })
@@ -140,8 +156,8 @@ def _walk_django_patterns(patterns, prefix, endpoints, seen):
 
 def _detect_django_methods(callback):
     """
-    Try to detect HTTP methods from a Django view
-    Works for class-based views and function-based views
+    Detect HTTP methods from a Django view.
+    Handles class-based views, DRF ViewSets/APIViews, and function-based views.
     """
     # Class-based view — has http_method_names
     if hasattr(callback, "view_class"):
@@ -149,9 +165,15 @@ def _detect_django_methods(callback):
         all_methods = ["GET", "POST", "PUT", "PATCH", "DELETE"]
         return [m for m in all_methods if hasattr(cls, m.lower())]
 
-    # DRF ViewSet or APIView
+    # DRF ViewSet — has actions dict
     if hasattr(callback, "actions"):
         return [m.upper() for m in callback.actions.keys()]
+
+    # DRF APIView — has http_method_names on the cls
+    if hasattr(callback, "cls"):
+        cls = callback.cls
+        all_methods = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+        return [m for m in all_methods if hasattr(cls, m.lower())]
 
     # Function-based view — default to GET + POST
     return ["GET", "POST"]
@@ -159,17 +181,19 @@ def _detect_django_methods(callback):
 
 def _django_pattern_to_path(pattern):
     """
-    Convert Django URL pattern to a clean path string
+    Convert Django URL pattern to a clean path string.
     e.g. "api/users/(?P<id>[0-9]+)/" → "/api/users/:id"
     """
     # Remove regex named groups
     path = re.sub(r"\(\?P<([^>]+)>[^)]+\)", r":\1", pattern)
+    # New-style Django path converters <int:pk> → :pk
+    path = re.sub(r"<(?:[^:>]+:)?([^>]+)>", r":\1", path)
     # Remove remaining regex artifacts
     path = re.sub(r"[\\^$]", "", path)
     # Ensure leading slash
     if not path.startswith("/"):
         path = "/" + path
-    # Remove trailing slash for consistency
+    # Remove trailing slash for consistency (keep root as "/")
     path = path.rstrip("/") or "/"
     return path
 
@@ -178,7 +202,7 @@ def _django_pattern_to_path(pattern):
 
 def normalize_flask_path(rule):
     """
-    Convert Flask path format to standard :param format
+    Convert Flask path format to standard :param format.
     /users/<int:id> → /users/:id
     /users/<string:name> → /users/:name
     /users/<id> → /users/:id
@@ -187,17 +211,27 @@ def normalize_flask_path(rule):
 
 
 def extract_path_params(path):
+    """Extract :param names from a path like /users/:id/posts/:postId"""
     return re.findall(r":([a-zA-Z_][a-zA-Z0-9_]*)", path)
 
 
 def build_param_schema(params):
+    """
+    Build a simple schema from path param names.
+    Mirrors JS buildParamSchema()
+    """
     return {p: "string" for p in params}
 
 
 def generate_description(method, path, handler_name=None):
-    if handler_name and handler_name not in ("anonymous", ""):
-        # Convert snake_case or camelCase to readable
+    """
+    Generate a human-readable description for an endpoint.
+    Mirrors JS scanner logic.
+    """
+    if handler_name and handler_name not in ("anonymous", "dispatch", ""):
+        # Convert snake_case → readable words
         name = re.sub(r"_", " ", handler_name)
+        # Convert camelCase → readable words
         name = re.sub(r"([A-Z])", r" \1", name)
         return name.strip().title()
 
@@ -213,5 +247,5 @@ def generate_description(method, path, handler_name=None):
         "DELETE": "Delete",
     }
 
-    verb = verbs.get(method, method)
+    verb = verbs.get(method, method.title())
     return f"{verb} {resource}"

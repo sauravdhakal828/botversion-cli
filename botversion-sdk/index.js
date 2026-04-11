@@ -61,7 +61,8 @@ var BotVersion = {
 
     this._client = new BotVersionClient({
       apiKey: options.apiKey,
-      platformUrl: options.platformUrl || "http://localhost:3000",
+      platformUrl:
+        options.platformUrl || "https://chatbusiness-two.vercel.app/",
       debug: options.debug || false,
       timeout: options.timeout || 30000,
     });
@@ -205,9 +206,9 @@ var BotVersion = {
           .registerEndpoints(endpoints)
           .then(function () {
             console.log(
-              "[BotVersion SDK] ✅ Static scan complete —",
+              "[BotVersion SDK] ✅ Endpoints queued —",
               endpoints.length,
-              "endpoints registered",
+              "endpoints will be sent shortly",
             );
           })
           .catch(function (err) {
@@ -571,6 +572,14 @@ BotVersion.nextHandler = function (options) {
 
 BotVersion.nextHandler = BotVersion.nextHandler.bind(BotVersion);
 
+BotVersion.appRouterHandler = function () {
+  throw new Error(
+    "[BotVersion SDK] appRouterHandler is not supported. " +
+      "Please run: npx botversion-sdk init --key YOUR_KEY --force " +
+      "to regenerate the correct route file.",
+  );
+};
+
 module.exports = BotVersion;
 module.exports.default = BotVersion;
 module.exports.init = BotVersion.init;
@@ -578,6 +587,7 @@ module.exports.getEndpoints = BotVersion.getEndpoints;
 module.exports.registerEndpoint = BotVersion.registerEndpoint;
 module.exports.chat = BotVersion.chat;
 module.exports.nextHandler = BotVersion.nextHandler;
+module.exports.appRouterHandler = BotVersion.appRouterHandler;
 
 // ── Framework detection ──────────────────────────────────────────────────────
 function detectFramework(app) {

@@ -29,6 +29,9 @@ function log(msg) {
 function info(msg) {
   console.log(`${c.cyan}  ℹ${c.reset}  ${msg}`);
 }
+function info2(msg) {
+  console.log(`${c.cyan}  ℹ${c.reset}  ${msg}`);
+}
 function success(msg) {
   console.log(`${c.green}  ✔${c.reset}  ${msg}`);
 }
@@ -106,10 +109,10 @@ async function main() {
   }
 
   // Run full detection
-  const info2 = detector.detect(workingDir);
+  const detected = detector.detect(workingDir);
 
   // ── Check if already initialized ─────────────────────────────────────────
-  if (info2.alreadyInitialized && !args.force) {
+  if (detected.alreadyInitialized && !args.force) {
     warn("BotVersion SDK is already initialized in this project.");
     log(`\n  To reinitialize, run with --force flag:\n`);
     log(`  npx botversion-sdk init --key ${args.key} --force\n`);
@@ -119,68 +122,71 @@ async function main() {
   // ── Framework check ───────────────────────────────────────────────────────
   step("Detecting framework...");
 
-  if (!info2.framework.name) {
+  if (!detected.framework.name) {
     error("Could not detect a supported framework.");
     log(`\n  Supported: Express.js, Next.js`);
     log(`  Make sure you have them listed in package.json\n`);
     process.exit(1);
   }
 
-  if (!info2.framework.supported) {
+  if (!detected.framework.supported) {
     warn(
-      `Detected: ${info2.framework.name} (not yet supported for auto-setup)`,
+      `Detected: ${detected.framework.name} (not yet supported for auto-setup)`,
     );
     log("");
-    log(generator.generateManualInstructions(info2.framework.name, args.key));
+    log(
+      generator.generateManualInstructions(detected.framework.name, args.key),
+    );
     process.exit(0);
   }
 
-  success(`Framework: ${info2.framework.name}`);
+  success(`Framework: ${detected.framework.name}`);
   info(
-    `Module system: ${info2.moduleSystem === "esm" ? "ES Modules" : "CommonJS"}`,
+    `Module system: ${detected.moduleSystem === "esm" ? "ES Modules" : "CommonJS"}`,
   );
-  info(`Language: ${info2.isTypeScript ? "TypeScript" : "JavaScript"}`);
+  info(`Language: ${detected.isTypeScript ? "TypeScript" : "JavaScript"}`);
 
   // ── Auth detection ────────────────────────────────────────────────────────
   step("Detecting auth library...");
 
-  let auth = info2.auth;
+  let auth = detected.auth;
 
   if (!auth.name) {
     warn("No auth library detected automatically.");
     auth = await prompts.promptAuthLibrary();
-    info2.auth = auth;
+    detected.auth = auth;
   } else if (!auth.supported) {
     warn(`Detected auth: ${auth.name} (not yet supported for auto-setup)`);
     warn("Will set up without user context — you can add it manually later.");
     const proceed = await prompts.confirm("Continue without auth?", true);
     if (!proceed) process.exit(0);
     auth = { name: auth.name, supported: false };
-    info2.auth = auth;
+    detected.auth = auth;
   } else {
     const versionLabel = auth.version ? ` (${auth.version})` : "";
     success(`Auth: ${auth.name}${versionLabel}`);
   }
 
   // ── Package manager ───────────────────────────────────────────────────────
-  info(`Package manager: ${info2.packageManager}`);
+  info(`Package manager: ${detected.packageManager}`);
 
   // ─────────────────────────────────────────────────────────────────────────
   // FRAMEWORK: EXPRESS
   // ─────────────────────────────────────────────────────────────────────────
-  if (info2.framework.name === "express") {
-    await setupExpress(info2, args, changes);
+  if (detected.framework.name === "express") {
+    await setupExpress(detected, args, changes);
   }
 
   // ─────────────────────────────────────────────────────────────────────────
   // FRAMEWORK: NEXT.JS
   // ─────────────────────────────────────────────────────────────────────────
-  else if (info2.framework.name === "next") {
-    await setupNextJs(info2, args, changes);
+  else if (detected.framework.name === "next") {
+    await setupNextJs(detected, args, changes);
   }
 
   // ── Write API key to .env / .env.local ────────────────────────────────────
-  const envFileName = info2.framework.name === "next" ? ".env.local" : ".env";
+  const envFileName =
+    detected.framework.name === "next" ? ".env.local" : ".env";
   const envPath = path.join(workingDir, envFileName);
   const envLine = `BOTVERSION_API_KEY=${args.key}`;
   const envContent = fs.existsSync(envPath)
@@ -216,16 +222,16 @@ async function main() {
 
 // ─── EXPRESS SETUP ────────────────────────────────────────────────────────────
 
-async function setupExpress(info, args, changes) {
+async function setupExpress(detected, args, changes) {
   step("Setting up Express...");
 
   // Find entry point
-  let entryPoint = info.entryPoint;
+  let entryPoint = detected.entryPoint;
 
   if (!entryPoint || !fs.existsSync(entryPoint)) {
     warn("Could not find your server entry point automatically.");
     const manualPath = await prompts.promptEntryPoint();
-    entryPoint = path.resolve(info.cwd, manualPath);
+    entryPoint = path.resolve(detected.cwd, manualPath);
 
     if (!fs.existsSync(entryPoint)) {
       error(`File not found: ${entryPoint}`);
@@ -233,40 +239,65 @@ async function setupExpress(info, args, changes) {
     }
   }
 
-  success(`Entry point: ${path.relative(info.cwd, entryPoint)}`);
+  success(`Entry point: ${path.relative(detected.cwd, entryPoint)}`);
 
   // Generate the init code
-  const generated = generator.generateExpressInit(info, args.key);
+  const generated = generator.generateExpressInit(detected, args.key);
 
   // Find app.listen() and inject before it
   const listenCall = detector.findListenCall(entryPoint);
 
-  if (listenCall) {
-    info(`Found app.listen() at line ${listenCall.lineNumber}`);
+  // PATTERN 2: Separate app file with module.exports = app
+  if (detected.appFile) {
+    info(`Found app file: ${path.relative(detected.cwd, detected.appFile)}`);
+    const generated2 = generator.generateExpressInit(detected, args.key);
+    const result = writer.injectBeforeExport(
+      detected.appFile,
+      generated2.initBlock,
+    );
+
+    if (result.success) {
+      success(
+        `Injected BotVersion.init() into ${path.relative(detected.cwd, detected.appFile)}`,
+      );
+      changes.modified.push(path.relative(detected.cwd, detected.appFile));
+    } else if (result.reason === "already_exists") {
+      warn("BotVersion already found — skipping injection.");
+    }
+  }
+
+  // PATTERN 1 & 3 & 4: app.listen() or server.listen() in entry file
+  else if (
+    detected.listenCall ||
+    detected.listenInsideCallback ||
+    detected.createServer
+  ) {
     const result = writer.injectBeforeListen(entryPoint, generated.initBlock);
 
     if (result.success) {
       success(`Injected BotVersion.init() before app.listen()`);
-      changes.modified.push(path.relative(info.cwd, entryPoint));
+      changes.modified.push(path.relative(detected.cwd, entryPoint));
       if (result.backup) changes.backups.push(result.backup);
     } else if (result.reason === "already_exists") {
       warn("BotVersion already found in entry point — skipping injection.");
     }
-  } else {
-    // app.listen() not found
-    warn("Could not find app.listen() in entry point.");
+  }
+
+  // LAST RESORT: ask the user
+  else {
+    warn("Could not find the right place to inject automatically.");
     const response = await prompts.promptMissingListenCall(
-      path.relative(info.cwd, entryPoint),
+      path.relative(detected.cwd, entryPoint),
     );
 
     if (response.action === "append") {
       const result = writer.appendToFile(entryPoint, generated.initBlock);
       if (result.success) {
         success("Appended BotVersion setup to end of file.");
-        changes.modified.push(path.relative(info.cwd, entryPoint));
+        changes.modified.push(path.relative(detected.cwd, entryPoint));
       }
     } else if (response.action === "manual_path") {
-      const altPath = path.resolve(info.cwd, response.filePath);
+      const altPath = path.resolve(detected.cwd, response.filePath);
       if (fs.existsSync(altPath)) {
         const result = writer.injectBeforeListen(altPath, generated.initBlock);
         if (result.success) {
@@ -280,7 +311,6 @@ async function setupExpress(info, args, changes) {
         );
       }
     } else {
-      // skip — print manual instructions
       changes.manual.push(
         `Add this to your server file before app.listen():\n\n${generated.initBlock}`,
       );
@@ -291,10 +321,10 @@ async function setupExpress(info, args, changes) {
 
 // ─── NEXT.JS SETUP ────────────────────────────────────────────────────────────
 
-async function setupNextJs(info, args, changes) {
+async function setupNextJs(detected, args, changes) {
   step("Setting up Next.js...");
 
-  const nextInfo = info.next;
+  const nextInfo = detected.next;
   const baseDir = nextInfo.baseDir;
 
   info2(
@@ -302,20 +332,23 @@ async function setupNextJs(info, args, changes) {
   );
 
   // ── next-auth config location ─────────────────────────────────────────────
-  if (info.auth.name === "next-auth" && !info.nextAuthConfig) {
+  if (detected.auth.name === "next-auth" && !detected.nextAuthConfig) {
     warn("Could not find authOptions location automatically.");
     const configPath = await prompts.promptNextAuthConfigPath();
-    info.nextAuthConfig = {
-      path: path.resolve(info.cwd, configPath),
+    detected.nextAuthConfig = {
+      path: path.resolve(detected.cwd, configPath),
       relativePath: configPath,
     };
   }
 
   // ── 1. Create instrumentation.js ──────────────────────────────────────────
-  const instrExt = info.generateTs ? ".ts" : ".js";
-  const instrFile = path.join(info.cwd, `instrumentation${instrExt}`);
+  const instrExt = detected.generateTs ? ".ts" : ".js";
+  const instrFile = path.join(detected.cwd, `instrumentation${instrExt}`);
 
-  const instrContent = generator.generateInstrumentationFile(info, args.key);
+  const instrContent = generator.generateInstrumentationFile(
+    detected,
+    args.key,
+  );
   const instrResult = writer.createFile(instrFile, instrContent, args.force);
 
   if (instrResult.success) {
@@ -333,15 +366,15 @@ async function setupNextJs(info, args, changes) {
   }
 
   // ── 2. Patch next.config.js ───────────────────────────────────────────────
-  const configPatch = generator.generateNextConfigPatch(info.cwd);
+  const configPatch = generator.generateNextConfigPatch(detected.cwd);
 
   if (configPatch) {
     if (configPatch.alreadyPatched) {
       info("next.config.js already has instrumentationHook — skipping.");
     } else {
       fs.writeFileSync(configPatch.path, configPatch.content, "utf8");
-      success(`Updated ${path.relative(info.cwd, configPatch.path)}`);
-      changes.modified.push(path.relative(info.cwd, configPatch.path));
+      success(`Updated ${path.relative(detected.cwd, configPatch.path)}`);
+      changes.modified.push(path.relative(detected.cwd, configPatch.path));
     }
   } else {
     warn("Could not find next.config.js — please add this manually:");
@@ -356,7 +389,7 @@ async function setupNextJs(info, args, changes) {
     const chatDir = path.join(pagesBase, "api", "botversion");
     const chatFile = path.join(chatDir, `chat${instrExt}`);
 
-    const chatContent = generator.generateNextPagesChatRoute(info);
+    const chatContent = generator.generateNextPagesChatRoute(detected);
     const chatResult = writer.createFile(chatFile, chatContent, args.force);
 
     const relPath = `${nextInfo.srcDir ? "src/" : ""}pages/api/botversion/chat${instrExt}`;
@@ -382,7 +415,7 @@ async function setupNextJs(info, args, changes) {
     const chatDir = path.join(appBase, "api", "botversion", "chat");
     const chatFile = path.join(chatDir, `route${instrExt}`);
 
-    const chatContent = generator.generateNextAppChatRoute(info);
+    const chatContent = generator.generateNextAppChatRoute(detected);
     const relPath = `${nextInfo.srcDir ? "src/" : ""}app/api/botversion/chat/route${instrExt}`;
 
     const chatResult = writer.createFile(chatFile, chatContent, args.force);
@@ -401,11 +434,6 @@ async function setupNextJs(info, args, changes) {
       }
     }
   }
-}
-
-// ─── helper used inside setupNextJs ──────────────────────────────────────────
-function info2(msg) {
-  console.log(`${c.cyan}  ℹ${c.reset}  ${msg}`);
 }
 
 // ─── RUN ──────────────────────────────────────────────────────────────────────

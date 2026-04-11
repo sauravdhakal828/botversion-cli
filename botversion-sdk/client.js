@@ -20,6 +20,10 @@ function BotVersionClient(options) {
   this._queue = [];
   this._flushTimer = null;
   this._flushDelay = options.flushDelay || 3000; // batch every 3 seconds
+  var self = this;
+  process.on("beforeExit", function () {
+    if (self._queue.length > 0) self._flush();
+  });
 }
 
 /**

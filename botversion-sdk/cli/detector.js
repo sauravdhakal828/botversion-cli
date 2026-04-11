@@ -269,6 +269,43 @@ function findListenCall(filePath) {
   return null;
 }
 
+function findModuleExportsApp(filePath) {
+  const content = fs.readFileSync(filePath, "utf8");
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (/module\.exports\s*=\s*app/.test(lines[i])) {
+      return { lineIndex: i, lineNumber: i + 1, content: lines[i] };
+    }
+  }
+  return null;
+}
+
+function findListenInsideCallback(filePath) {
+  const content = fs.readFileSync(filePath, "utf8");
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (/app\.listen\s*\(/.test(lines[i])) {
+      // Check if it's inside a callback (indented or preceded by .then)
+      const indentation = lines[i].match(/^(\s*)/)[1].length;
+      if (indentation > 0) {
+        return { lineIndex: i, lineNumber: i + 1, insideCallback: true };
+      }
+    }
+  }
+  return null;
+}
+
+function findCreateServer(filePath) {
+  const content = fs.readFileSync(filePath, "utf8");
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (/createServer\s*\(\s*app\s*\)/.test(lines[i])) {
+      return { lineIndex: i, lineNumber: i + 1, content: lines[i] };
+    }
+  }
+  return null;
+}
+
 // ─── AUTH DETECTION ──────────────────────────────────────────────────────────
 
 const AUTH_LIBS = [
@@ -481,6 +518,16 @@ function findFileWithContent(dir, searchString, extensions, maxDepth) {
   return walk(dir, 0);
 }
 
+function detectAppVarName(filePath) {
+  try {
+    const content = fs.readFileSync(filePath, "utf8");
+    const match = content.match(/(?:const|let|var)\s+(\w+)\s*=\s*express\s*\(/);
+    return match ? match[1] : "app";
+  } catch (e) {
+    return "app";
+  }
+}
+
 // ─── MAIN DETECT FUNCTION ────────────────────────────────────────────────────
 
 function detect(cwd) {
@@ -524,6 +571,29 @@ function detect(cwd) {
     result.entryPoint = detectExpressEntry(cwd, pkg);
     if (result.entryPoint) {
       result.listenCall = findListenCall(result.entryPoint);
+      result.moduleExportsApp = findModuleExportsApp(result.entryPoint);
+      result.listenInsideCallback = findListenInsideCallback(result.entryPoint);
+      result.createServer = findCreateServer(result.entryPoint);
+      result.appVarName = detectAppVarName(result.entryPoint);
+
+      // Also check for app file separately (pattern 2)
+      const appFileCandidates = [
+        "src/app.js",
+        "src/app.ts",
+        "app.js",
+        "app.ts",
+      ];
+      for (const candidate of appFileCandidates) {
+        const fullPath = path.join(cwd, candidate);
+        if (fs.existsSync(fullPath) && fullPath !== result.entryPoint) {
+          const exportCall = findModuleExportsApp(fullPath);
+          if (exportCall) {
+            result.appFile = fullPath;
+            result.appFileExport = exportCall;
+            break;
+          }
+        }
+      }
     }
   }
 
@@ -555,4 +625,8 @@ module.exports = {
   detectExistingBotVersion,
   findFileWithContent,
   findListenCall,
+  findModuleExportsApp,
+  findListenInsideCallback,
+  findCreateServer,
+  detectAppVarName,
 };

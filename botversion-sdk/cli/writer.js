@@ -17,7 +17,7 @@ function writeFile(filePath, content) {
 
 function backupFile(filePath) {
   if (!fs.existsSync(filePath)) return null;
-  const backupPath = filePath + ".botversion.bak";
+  const backupPath = filePath + ".backup-before-botversion";
   fs.copyFileSync(filePath, backupPath);
   return backupPath;
 }
@@ -58,10 +58,10 @@ function injectBeforeListen(filePath, codeToInject) {
   const injectedLines = ["", ...codeToInject.split("\n"), ""];
 
   const newContent = [...before, ...injectedLines, ...after].join("\n");
-  backupFile(filePath);
+  const backup = backupFile(filePath);
   fs.writeFileSync(filePath, newContent, "utf8");
 
-  return { success: true, lineNumber: listenLineIndex + 1 };
+  return { success: true, lineNumber: listenLineIndex + 1, backup };
 }
 
 // ─── APPEND CODE TO END OF FILE ──────────────────────────────────────────────
@@ -92,6 +92,84 @@ function createFile(filePath, content, force) {
 
   writeFile(filePath, content);
   return { success: true, path: filePath };
+}
+
+function injectBeforeExport(filePath, codeToInject) {
+  const content = fs.readFileSync(filePath, "utf8");
+  const lines = content.split("\n");
+
+  if (content.includes("botversion-sdk") || content.includes("BotVersion")) {
+    return { success: false, reason: "already_exists" };
+  }
+
+  let insertIndex = -1;
+
+  // Find module.exports = app
+  let exportsLine = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/module\.exports\s*=\s*app/.test(lines[i])) {
+      exportsLine = i;
+      break;
+    }
+  }
+
+  if (exportsLine !== -1) {
+    // Walk backwards from module.exports to skip error handler lines
+    // Skip lines that are: blank, closing braces, or known error middleware
+    let i = exportsLine - 1;
+    while (i >= 0) {
+      const line = lines[i].trim();
+      if (
+        line === "" ||
+        line === "})" ||
+        line === "});" ||
+        line === "}," ||
+        line === "}" ||
+        line === ");" ||
+        line === "next();" ||
+        /app\.use\s*\(\s*errorHandler/.test(line) ||
+        /app\.use\s*\(\s*errorConverter/.test(line) ||
+        /app\.use\s*\(\s*\(req,\s*res,\s*next\)/.test(line) ||
+        /next\(new/.test(line) ||
+        /NOT_FOUND/.test(line) ||
+        /Not found/i.test(line) ||
+        /\/\/ (handle|convert|send back) error/.test(lines[i]) ||
+        /\/\/ send back a 404/.test(lines[i])
+      ) {
+        i--;
+      } else {
+        break;
+      }
+    }
+    insertIndex = i + 1;
+  }
+
+  // Fallback: before app.listen()
+  if (insertIndex === -1) {
+    for (let i = 0; i < lines.length; i++) {
+      if (/app\.listen\s*\(/.test(lines[i])) {
+        insertIndex = i;
+        break;
+      }
+    }
+  }
+
+  // Final fallback: append to end of file
+  if (insertIndex === -1) {
+    const backup = backupFile(filePath);
+    const newContent = content.trimEnd() + "\n\n" + codeToInject + "\n";
+    fs.writeFileSync(filePath, newContent, "utf8");
+    return { success: true, backup };
+  }
+
+  const before = lines.slice(0, insertIndex);
+  const after = lines.slice(insertIndex);
+  const injectedLines = ["", ...codeToInject.split("\n"), ""];
+  const newContent = [...before, ...injectedLines, ...after].join("\n");
+
+  const backup = backupFile(filePath);
+  fs.writeFileSync(filePath, newContent, "utf8");
+  return { success: true, backup };
 }
 
 // ─── MERGE INTO EXISTING MIDDLEWARE (Next.js) ────────────────────────────────
@@ -168,4 +246,5 @@ module.exports = {
   createFile,
   mergeIntoMiddleware,
   writeSummary,
+  injectBeforeExport,
 };
