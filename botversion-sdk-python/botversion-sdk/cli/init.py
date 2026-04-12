@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-botversion-sdk-python/cli/init.py
+botversion-sdk-python/botversion-sdk/cli/init.py
 
 Main CLI entry point — runs when user types:
     python -m botversion_sdk.cli.init --key YOUR_KEY
@@ -87,10 +87,30 @@ def main():
     cwd = os.path.abspath(args.cwd) if args.cwd else os.getcwd()
     changes = {"modified": [], "created": [], "backups": [], "manual": []}
 
+    # ── Fetch project info from platform ──────────────────────────────────────
+    step("Fetching project info from platform...")
+    try:
+        import urllib.request
+        import json as _json
+        url = f"http://localhost:3000/api/sdk/project-info?workspaceKey={args.key}"
+        with urllib.request.urlopen(url) as response:
+            project_info = _json.loads(response.read().decode())
+        success(f"Project found — ID: {project_info.get('projectId')}")
+    except Exception as e:
+        error(f"Could not fetch project info: {e}")
+        sys.exit(1)
+
     # ── Detect environment ────────────────────────────────────────────────────
     step("Scanning your project...")
 
     detected = detector.detect(cwd)
+
+    detected["project_info"] = {
+        "cdn_url": project_info.get("cdnUrl"),
+        "api_url": project_info.get("apiUrl"),
+        "project_id": project_info.get("projectId"),
+        "public_key": project_info.get("publicKey"),
+    }
 
     # ── Check if already initialized ─────────────────────────────────────────
     if detected.get("already_initialized") and not args.force:
@@ -232,6 +252,9 @@ def setup_fastapi(detected, args, changes, cwd):
     else:
         _handle_missing_run_call(entry_point, generated["init_block"], "fastapi", changes, cwd, detected)
 
+    # ── Inject script tag into frontend file ──────────────────────────────────
+    _inject_frontend_script_tag(detected, changes, cwd, args.force)
+
 
 # ── Flask setup ───────────────────────────────────────────────────────────────
 
@@ -277,6 +300,9 @@ def setup_flask(detected, args, changes, cwd):
 
     else:
         _handle_missing_run_call(entry_point, generated["init_block"], "flask", changes, cwd, detected)
+
+    # ── Inject script tag into frontend file ──────────────────────────────────
+    _inject_frontend_script_tag(detected, changes, cwd, args.force)
 
 
 # ── Django setup ──────────────────────────────────────────────────────────────
@@ -367,6 +393,56 @@ def setup_django(detected, args, changes, cwd):
             "    urlpatterns += [\n"
             "        path('api/botversion/chat/', botversion_sdk.chat_handler('django')),\n"
             "    ]"
+        )
+
+    # ── Inject script tag into frontend file ──────────────────────────────────
+    inject_frontend_script_tag(detected, changes, cwd, args.force)
+
+
+# ── Inject frontend script tag ────────────────────────────────────────────────
+
+def _inject_frontend_script_tag(detected, changes, cwd, force):
+    """
+    Injects the BotVersion script tag into the frontend HTML file.
+    Called at the end of every framework setup function.
+    """
+    frontend_main_file = detected.get("frontend_main_file")
+    project_info = detected.get("project_info")
+
+    if not project_info:
+        return
+
+    script_tag = writer.generate_script_tag(project_info)
+
+    if frontend_main_file:
+        result = writer.inject_script_tag(
+            frontend_main_file["file"],
+            frontend_main_file["type"],
+            script_tag,
+            force,
+        )
+
+        rel_path = os.path.relpath(frontend_main_file["file"], cwd)
+
+        if result["success"]:
+            success(f"Injected script tag into {rel_path}")
+            changes["modified"].append(rel_path)
+            if result.get("backup"):
+                changes["backups"].append(result["backup"])
+        elif result["reason"] == "already_exists":
+            warn("BotVersion script tag already exists — skipping.")
+        else:
+            warn("Could not auto-inject script tag. Add this manually to your HTML:")
+            log()
+            log(script_tag)
+            log()
+            changes["manual"].append(
+                f"Add to your frontend HTML before </body>:\n\n{script_tag}"
+            )
+    else:
+        warn("Could not find frontend HTML file automatically.")
+        changes["manual"].append(
+            f"Add to your frontend HTML before </body>:\n\n{script_tag}"
         )
 
 

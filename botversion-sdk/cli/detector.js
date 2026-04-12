@@ -851,7 +851,9 @@ function detect(cwd) {
   if (frontendDir && frontendPkg) {
     frontendMainFile = findMainFrontendFile(frontendDir, frontendPkg);
   } else if (framework.name === "next") {
-    // Next.js is fullstack — find its frontend file in backendDir
+    frontendMainFile = findMainFrontendFile(backendDir, backendPkg);
+  } else if (framework.name === "express" && !frontendDir) {
+    // Express + frontend in same root folder (e.g. public/index.html)
     frontendMainFile = findMainFrontendFile(backendDir, backendPkg);
   }
 

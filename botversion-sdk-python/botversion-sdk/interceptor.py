@@ -1,4 +1,4 @@
-# botversion-sdk-python/interceptor.py
+# botversion-sdk-python/botversion-sdk/interceptor.py
 import re
 import json
 import threading

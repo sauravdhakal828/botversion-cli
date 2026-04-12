@@ -1,5 +1,5 @@
 """
-botversion-sdk-python/cli/generator.py
+botversion-sdk-python/botversion-sdk/cli/generator.py
 
 Generates the code snippets that get injected into the user's project.
 Mirrors JS cli/generator.js

@@ -1,5 +1,5 @@
 """
-botversion-sdk-python/cli/writer.py
+botversion-sdk-python/botversion-sdk/cli/writer.py
 
 Reads, modifies, and writes files in the user's project.
 Mirrors JS cli/writer.js
@@ -266,6 +266,64 @@ def inject_django_url(urls_path, url_code):
         f.write(new_content)
 
     return {"success": True, "backup": backup, "method": "inject"}
+
+
+# ── Inject script tag into frontend file ─────────────────────────────────────
+
+def inject_script_tag(file_path, file_type, script_tag, force=False):
+    """
+    Injects the BotVersion script tag into the frontend HTML file.
+    Mirrors JS injectScriptTag()
+    """
+    if not os.path.exists(file_path):
+        return {"success": False, "reason": "file_not_found"}
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        return {"success": False, "reason": "read_error", "error": str(e)}
+
+    # Already exists check
+    if "botversion-loader" in content:
+        if not force:
+            return {"success": False, "reason": "already_exists"}
+
+    backup = backup_file(file_path)
+
+    # ── HTML file — inject before </body> ─────────────────────────────────────
+    if file_type == "html":
+        if "</body>" not in content:
+            return {"success": False, "reason": "no_body_tag"}
+
+        new_content = content.replace(
+            "</body>",
+            f"  {script_tag}\n</body>"
+        )
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        return {"success": True, "backup": backup}
+
+    return {"success": False, "reason": "unsupported_file_type"}
+
+
+# ── Generate script tag string ────────────────────────────────────────────────
+
+def generate_script_tag(project_info):
+    """
+    Generates the BotVersion <script> tag string.
+    Mirrors JS generateScriptTag() from generator.js
+    """
+    return (
+        f'<script\n'
+        f'  id="botversion-loader"\n'
+        f'  src="{project_info["cdn_url"]}"\n'
+        f'  data-api-url="{project_info["api_url"]}"\n'
+        f'  data-project-id="{project_info["project_id"]}"\n'
+        f'  data-public-key="{project_info["public_key"]}"\n'
+        f'  data-proxy-url="/api/botversion/chat"\n'
+        f'></script>'
+    )
 
 
 # ── Write summary of all changes ──────────────────────────────────────────────

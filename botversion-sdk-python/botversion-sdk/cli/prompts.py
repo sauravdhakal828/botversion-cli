@@ -1,5 +1,5 @@
 """
-botversion-sdk-python/cli/prompts.py
+botversion-sdk-python/botversion-sdk/cli/prompts.py
 
 Interactive CLI prompts — asks the user questions when things
 can't be auto-detected.

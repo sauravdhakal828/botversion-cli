@@ -1,5 +1,5 @@
 """
-botversion-sdk-python/cli/detector.py
+botversion-sdk-python/botversion-sdk/cli/detector.py
 
 Scans the user's Python project and detects everything needed for auto-setup.
 Mirrors JS cli/detector.js
@@ -398,6 +398,220 @@ def find_file_with_content(directory, search_string, extensions, max_depth=2):
     return walk(directory, 0)
 
 
+# ── Scan all package.json files (for separate frontend folders) ───────────────
+
+def scan_all_package_jsons(cwd):
+    """
+    Walks subdirectories looking for package.json files.
+    Used to find separate frontend folders (e.g. client/, frontend/).
+    Mirrors JS scanAllPackageJsons()
+    """
+    skip_dirs = {
+        "node_modules", ".git", ".next", "dist", "build",
+        ".cache", "__pycache__", ".venv", "venv", "env",
+    }
+    results = []
+
+    def walk(current_dir, depth):
+        if depth > 5:
+            return
+        try:
+            entries = os.listdir(current_dir)
+        except Exception:
+            return
+        for entry in entries:
+            if entry in skip_dirs:
+                continue
+            full_path = os.path.join(current_dir, entry)
+            if os.path.isdir(full_path):
+                walk(full_path, depth + 1)
+            elif entry == "package.json":
+                try:
+                    with open(full_path, "r", encoding="utf-8") as f:
+                        pkg = json.load(f)
+                    results.append({"dir": current_dir, "pkg": pkg})
+                except Exception:
+                    continue
+
+    walk(cwd, 0)
+    return results
+
+
+# ── Detect frontend framework from package.json ───────────────────────────────
+
+def detect_frontend_framework(pkg):
+    """
+    Looks at a package.json and returns which frontend framework is being used.
+    Mirrors JS detectFrontendFramework()
+    """
+    if not pkg:
+        return None
+
+    deps = {}
+    deps.update(pkg.get("dependencies", {}))
+    deps.update(pkg.get("devDependencies", {}))
+
+    if "next" in deps:
+        return "next"
+    if "@sveltejs/kit" in deps:
+        return "sveltekit"
+    if "svelte" in deps:
+        return "svelte"
+    if "@angular/core" in deps:
+        return "angular"
+    if "vue" in deps:
+        return "vue"
+    if "react-dom" in deps or "react" in deps:
+        if "vite" in deps or "@vitejs/plugin-react" in deps:
+            return "react-vite"
+        return "react-cra"
+    if "solid-js" in deps:
+        return "solid"
+    if "preact" in deps:
+        return "preact"
+
+    return None
+
+
+# ── Find main template file (Django/Flask specific) ───────────────────────────
+
+def find_main_template_file(cwd):
+    """
+    Finds the main HTML template file for Django/Flask projects.
+    Looks for base.html or index.html inside templates/ folder.
+    Python-specific — no JS equivalent.
+    """
+    candidates = [
+        "templates/base.html",
+        "templates/index.html",
+        "templates/layout.html",
+        "templates/main.html",
+        "app/templates/base.html",
+        "app/templates/index.html",
+        "src/templates/base.html",
+        "src/templates/index.html",
+    ]
+
+    for candidate in candidates:
+        full_path = os.path.join(cwd, candidate)
+        if os.path.exists(full_path):
+            try:
+                with open(full_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                if "<body" in content or "<html" in content:
+                    return {"file": full_path, "type": "html"}
+            except Exception:
+                continue
+
+    return None
+
+
+# ── Find main frontend file ───────────────────────────────────────────────────
+
+def find_main_frontend_file(directory, pkg):
+    """
+    Based on the frontend framework, finds the right file to inject
+    the script tag into.
+    Mirrors JS findMainFrontendFile()
+    """
+    framework = detect_frontend_framework(pkg)
+
+    # ── Angular ───────────────────────────────────────────────────────────────
+    if framework == "angular":
+        candidate = os.path.join(directory, "src", "index.html")
+        if os.path.exists(candidate):
+            return {"file": candidate, "type": "html"}
+        return None
+
+    # ── Vite-based (React Vite, Vue, Svelte, SvelteKit, Solid, Preact) ────────
+    if framework in ("react-vite", "vue", "svelte", "sveltekit", "solid", "preact"):
+        root_html = os.path.join(directory, "index.html")
+        if os.path.exists(root_html):
+            return {"file": root_html, "type": "html"}
+        public_html = os.path.join(directory, "public", "index.html")
+        if os.path.exists(public_html):
+            return {"file": public_html, "type": "html"}
+        return None
+
+    # ── React CRA ─────────────────────────────────────────────────────────────
+    if framework == "react-cra":
+        public_html = os.path.join(directory, "public", "index.html")
+        if os.path.exists(public_html):
+            return {"file": public_html, "type": "html"}
+        root_html = os.path.join(directory, "index.html")
+        if os.path.exists(root_html):
+            return {"file": root_html, "type": "html"}
+        return None
+
+    # ── Unknown frontend — scan common locations ───────────────────────────────
+    html_candidates = [
+        "index.html",
+        "public/index.html",
+        "static/index.html",
+        "src/index.html",
+        "www/index.html",
+    ]
+
+    for candidate in html_candidates:
+        full_path = os.path.join(directory, candidate)
+        if os.path.exists(full_path):
+            try:
+                with open(full_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                if "<body" in content or "<html" in content:
+                    return {"file": full_path, "type": "html"}
+            except Exception:
+                continue
+
+    # ── Last resort — deep scan for any .html file ────────────────────────────
+    found = find_html_file(directory)
+    if found:
+        return {"file": found, "type": "html"}
+
+    return None
+
+
+# ── Deep scan for any HTML file ───────────────────────────────────────────────
+
+def find_html_file(directory):
+    """
+    Last resort — walks subdirectories looking for any .html file
+    that looks like a real page (has <body> or <html> tag).
+    Mirrors JS findHtmlFile()
+    """
+    skip_dirs = {
+        "node_modules", ".git", "__pycache__",
+        ".venv", "venv", "env", "dist", "build",
+    }
+
+    def walk(current_dir, depth):
+        if depth > 3:
+            return None
+        try:
+            entries = os.listdir(current_dir)
+        except Exception:
+            return None
+        for entry in entries:
+            if entry in skip_dirs:
+                continue
+            full_path = os.path.join(current_dir, entry)
+            if os.path.isdir(full_path):
+                result = walk(full_path, depth + 1)
+                if result:
+                    return result
+            elif entry.endswith(".html"):
+                try:
+                    with open(full_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    if "<body" in content or "<html" in content:
+                        return full_path
+                except Exception:
+                    continue
+        return None
+
+    return walk(directory, 0)
+
+
 # ── Main detect function ──────────────────────────────────────────────────────
 
 def detect(cwd):
@@ -420,7 +634,7 @@ def detect(cwd):
         "has_src": has_src,
     }
 
-    # Framework-specific detection
+    # ── Framework-specific detection ──────────────────────────────────────────
     if framework["name"] in ("fastapi", "flask"):
         result["entry_point"] = detect_entry_point(cwd, framework["name"])
         if result["entry_point"]:
@@ -430,8 +644,49 @@ def detect(cwd):
     elif framework["name"] == "django":
         result["entry_point"] = detect_entry_point(cwd, "django")
         result["django_settings"] = find_django_settings(cwd)
-        result["run_call"] = None  # Django uses manage.py runserver
+        result["run_call"] = None
 
+    # ── Frontend detection ────────────────────────────────────────────────────
+    frontend_dir = None
+    frontend_pkg = None
+    frontend_main_file = None
+
+    # Step 1: scan for a separate frontend folder with its own package.json
+    all_packages = scan_all_package_jsons(cwd)
+    for item in all_packages:
+        dir_ = item["dir"]
+        pkg_ = item["pkg"]
+        deps = {}
+        deps.update(pkg_.get("dependencies", {}))
+        deps.update(pkg_.get("devDependencies", {}))
+        # Check if this folder is a frontend (has React, Vue, Angular etc.)
+        frontend_markers = [
+            "react", "react-dom", "vue", "@angular/core",
+            "svelte", "solid-js", "preact", "next",
+        ]
+        if any(m in deps for m in frontend_markers):
+            frontend_dir = dir_
+            frontend_pkg = pkg_
+            break
+
+    # Step 2: if separate frontend folder found, look for the file there
+    if frontend_dir and frontend_pkg:
+        frontend_main_file = find_main_frontend_file(frontend_dir, frontend_pkg)
+
+    # Step 3: if no separate frontend folder, look in the root folder itself
+    # This covers: Flask/FastAPI serving static/public/index.html
+    if not frontend_main_file:
+        frontend_main_file = find_main_frontend_file(cwd, {})
+
+    # Step 4: if still nothing, look for Django/Flask templates
+    if not frontend_main_file:
+        frontend_main_file = find_main_template_file(cwd)
+
+    result["frontend_dir"] = frontend_dir
+    result["frontend_pkg"] = frontend_pkg
+    result["frontend_main_file"] = frontend_main_file
+
+    # ── Already initialized check ─────────────────────────────────────────────
     result["already_initialized"] = detect_existing_botversion(
         result.get("entry_point")
     )

@@ -1,4 +1,4 @@
-# botversion-sdk-python/client.py
+# botversion-sdk-python/botversion-sdk/client.py
 import json
 import threading
 import urllib.request

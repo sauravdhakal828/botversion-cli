@@ -1,4 +1,4 @@
-# botversion-sdk-python/__init__.py
+# botversion-sdk-python/botversion-sdk/__init__.py
 import sys
 import threading
 import builtins

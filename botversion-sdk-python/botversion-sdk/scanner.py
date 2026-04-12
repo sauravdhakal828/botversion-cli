@@ -1,4 +1,4 @@
-# botversion-sdk-python/scanner.py
+# botversion-sdk-python/botversion-sdk/scanner.py
 import re
 
 
