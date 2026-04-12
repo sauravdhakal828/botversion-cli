@@ -1,0 +1,6 @@
+pyproject.toml
+botversion_sdk.egg-info/PKG-INFO
+botversion_sdk.egg-info/SOURCES.txt
+botversion_sdk.egg-info/dependency_links.txt
+botversion_sdk.egg-info/entry_points.txt
+botversion_sdk.egg-info/top_level.txt

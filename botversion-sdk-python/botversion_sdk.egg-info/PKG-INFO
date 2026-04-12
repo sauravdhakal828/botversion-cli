@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: botversion-sdk
+Version: 1.0.0
+Summary: BotVersion AI Agent SDK for FastAPI, Flask, and Django
+Author-email: Saurav Dhakal <sauravdhakal828@gmail.com>
+Requires-Python: >=3.8
