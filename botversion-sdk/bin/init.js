@@ -45,6 +45,22 @@ function step(msg) {
   console.log(`\n${c.bold}${c.white}  → ${msg}${c.reset}`);
 }
 
+// ─── FETCH PROJECT INFO ───────────────────────────────────────────────────────
+
+async function fetchProjectInfo(apiKey, platformUrl) {
+  const url = `${platformUrl}/api/sdk/project-info?workspaceKey=${encodeURIComponent(apiKey)}`;
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error("Invalid API key or project not found");
+    }
+    return await response.json();
+    // returns { projectId, publicKey, apiUrl, cdnUrl }
+  } catch (err) {
+    throw new Error(`Could not fetch project info: ${err.message}`);
+  }
+}
+
 // ─── PARSE ARGS ───────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
@@ -93,23 +109,30 @@ async function main() {
   const cwd = args.cwd;
   const changes = { modified: [], created: [], backups: [], manual: [] };
 
+  // ── Fetch project info from platform ──────────────────────────────────────
+  step("Fetching project info from platform...");
+  let projectInfo;
+  try {
+    projectInfo = await fetchProjectInfo(args.key, "http://localhost:3000");
+    success(`Project found — ID: ${projectInfo.projectId}`);
+  } catch (err) {
+    error(err.message);
+    process.exit(1);
+  }
+
   // ── Detect environment ────────────────────────────────────────────────────
   step("Scanning your project...");
 
   // Handle monorepo
-  let workingDir = cwd;
   const monorepoInfo = detector.detectMonorepo(cwd);
   if (monorepoInfo.isMonorepo) {
-    warn("Monorepo detected.");
-    workingDir = await prompts.promptMonorepoPackage(
-      monorepoInfo.packages,
-      cwd,
+    warn(
+      "Monorepo detected — will scan all packages for frontend and backend.",
     );
-    info(`Using package: ${path.relative(cwd, workingDir) || "root"}`);
   }
 
-  // Run full detection
-  const detected = detector.detect(workingDir);
+  // Always detect from root so frontend/backend split works correctly
+  const detected = detector.detect(cwd);
 
   // ── Check if already initialized ─────────────────────────────────────────
   if (detected.alreadyInitialized && !args.force) {
@@ -174,20 +197,60 @@ async function main() {
   // FRAMEWORK: EXPRESS
   // ─────────────────────────────────────────────────────────────────────────
   if (detected.framework.name === "express") {
-    await setupExpress(detected, args, changes);
+    await setupExpress(detected, args, changes, projectInfo);
+
+    // ── Inject script tag into frontend (Express only) ──────────────────
+    // Next.js handles its own script tag injection inside setupNextJs
+    if (detected.frontendMainFile && projectInfo) {
+      const scriptTag = generator.generateScriptTag(projectInfo);
+      const result = writer.injectScriptTag(
+        detected.frontendMainFile.file,
+        detected.frontendMainFile.type,
+        scriptTag,
+        args.force,
+      );
+
+      if (result.success) {
+        success(
+          `Injected script tag into ${path.relative(detected.cwd, detected.frontendMainFile.file)}`,
+        );
+        changes.modified.push(
+          path.relative(detected.cwd, detected.frontendMainFile.file),
+        );
+        if (result.backup) changes.backups.push(result.backup);
+      } else if (result.reason === "already_exists") {
+        warn(
+          "BotVersion script tag already exists in frontend file — skipping.",
+        );
+      } else {
+        warn(
+          "Could not auto-inject script tag. Add this manually to your frontend HTML:",
+        );
+        console.log("\n" + scriptTag + "\n");
+        changes.manual.push(
+          `Add to your frontend HTML before </body>:\n\n${scriptTag}`,
+        );
+      }
+    } else if (!detected.frontendMainFile) {
+      warn("Could not find frontend main file automatically.");
+      const scriptTag = generator.generateScriptTag(projectInfo);
+      changes.manual.push(
+        `Add to your frontend HTML before </body>:\n\n${scriptTag}`,
+      );
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────
   // FRAMEWORK: NEXT.JS
   // ─────────────────────────────────────────────────────────────────────────
   else if (detected.framework.name === "next") {
-    await setupNextJs(detected, args, changes);
+    await setupNextJs(detected, args, changes, projectInfo);
   }
 
   // ── Write API key to .env / .env.local ────────────────────────────────────
   const envFileName =
     detected.framework.name === "next" ? ".env.local" : ".env";
-  const envPath = path.join(workingDir, envFileName);
+  const envPath = path.join(detected.cwd, envFileName);
   const envLine = `BOTVERSION_API_KEY=${args.key}`;
   const envContent = fs.existsSync(envPath)
     ? fs.readFileSync(envPath, "utf8")
@@ -222,7 +285,7 @@ async function main() {
 
 // ─── EXPRESS SETUP ────────────────────────────────────────────────────────────
 
-async function setupExpress(detected, args, changes) {
+async function setupExpress(detected, args, changes, projectInfo) {
   step("Setting up Express...");
 
   // Find entry point
@@ -244,9 +307,6 @@ async function setupExpress(detected, args, changes) {
   // Generate the init code
   const generated = generator.generateExpressInit(detected, args.key);
 
-  // Find app.listen() and inject before it
-  const listenCall = detector.findListenCall(entryPoint);
-
   // PATTERN 2: Separate app file with module.exports = app
   if (detected.appFile) {
     info(`Found app file: ${path.relative(detected.cwd, detected.appFile)}`);
@@ -254,6 +314,7 @@ async function setupExpress(detected, args, changes) {
     const result = writer.injectBeforeExport(
       detected.appFile,
       generated2.initBlock,
+      detected.appVarName,
     );
 
     if (result.success) {
@@ -272,7 +333,11 @@ async function setupExpress(detected, args, changes) {
     detected.listenInsideCallback ||
     detected.createServer
   ) {
-    const result = writer.injectBeforeListen(entryPoint, generated.initBlock);
+    const result = writer.injectBeforeListen(
+      entryPoint,
+      generated.initBlock,
+      detected.appVarName,
+    );
 
     if (result.success) {
       success(`Injected BotVersion.init() before app.listen()`);
@@ -299,7 +364,11 @@ async function setupExpress(detected, args, changes) {
     } else if (response.action === "manual_path") {
       const altPath = path.resolve(detected.cwd, response.filePath);
       if (fs.existsSync(altPath)) {
-        const result = writer.injectBeforeListen(altPath, generated.initBlock);
+        const result = writer.injectBeforeListen(
+          altPath,
+          generated.initBlock,
+          detected.appVarName,
+        );
         if (result.success) {
           success(`Injected into ${response.filePath}`);
           changes.modified.push(response.filePath);
@@ -321,7 +390,7 @@ async function setupExpress(detected, args, changes) {
 
 // ─── NEXT.JS SETUP ────────────────────────────────────────────────────────────
 
-async function setupNextJs(detected, args, changes) {
+async function setupNextJs(detected, args, changes, projectInfo) {
   step("Setting up Next.js...");
 
   const nextInfo = detected.next;
@@ -366,7 +435,10 @@ async function setupNextJs(detected, args, changes) {
   }
 
   // ── 2. Patch next.config.js ───────────────────────────────────────────────
-  const configPatch = generator.generateNextConfigPatch(detected.cwd);
+  const configPatch = generator.generateNextConfigPatch(
+    detected.cwd,
+    detected.nextVersion,
+  );
 
   if (configPatch) {
     if (configPatch.alreadyPatched) {
@@ -433,6 +505,45 @@ async function setupNextJs(detected, args, changes) {
         warn(`Skipped ${relPath}`);
       }
     }
+  }
+
+  // ── 5. Inject script tag into frontend ───────────────────────────────────
+  // For Next.js the frontend IS the same project
+  // frontendMainFile will be _app.js or layout.js
+  if (detected.frontendMainFile && projectInfo) {
+    const scriptTag = generator.generateScriptTag(projectInfo);
+    const result = writer.injectScriptTag(
+      detected.frontendMainFile.file,
+      detected.frontendMainFile.type,
+      scriptTag,
+      args.force,
+    );
+
+    if (result.success) {
+      success(
+        `Injected script tag into ${path.relative(detected.cwd, detected.frontendMainFile.file)}`,
+      );
+      changes.modified.push(
+        path.relative(detected.cwd, detected.frontendMainFile.file),
+      );
+      if (result.backup) changes.backups.push(result.backup);
+    } else if (result.reason === "already_exists") {
+      warn("BotVersion script tag already exists — skipping.");
+    } else {
+      warn(
+        "Could not auto-inject script tag. Add this manually to your frontend file:",
+      );
+      console.log("\n" + scriptTag + "\n");
+      changes.manual.push(
+        `Add to your frontend HTML before </body>:\n\n${scriptTag}`,
+      );
+    }
+  } else if (!detected.frontendMainFile) {
+    warn("Could not find frontend file automatically.");
+    const scriptTag = generator.generateScriptTag(projectInfo);
+    changes.manual.push(
+      `Add to your frontend HTML before </body>:\n\n${scriptTag}`,
+    );
   }
 }
 

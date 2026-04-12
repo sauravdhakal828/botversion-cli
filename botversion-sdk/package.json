@@ -1,6 +1,6 @@
 {
   "name": "botversion-sdk",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "BotVersion SDK — auto-detect and register your API endpoints",
   "main": "index.js",
   "bin": {

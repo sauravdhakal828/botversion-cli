@@ -24,14 +24,15 @@ function backupFile(filePath) {
 
 // ─── INJECT CODE BEFORE app.listen() ────────────────────────────────────────
 
-function injectBeforeListen(filePath, codeToInject) {
+function injectBeforeListen(filePath, codeToInject, appVarName) {
+  appVarName = appVarName || "app";
   const content = fs.readFileSync(filePath, "utf8");
   const lines = content.split("\n");
+  const listenRegex = new RegExp(`${appVarName}\\.listen\\s*\\(`);
 
-  // Find app.listen() line
   let listenLineIndex = -1;
   for (let i = 0; i < lines.length; i++) {
-    if (/app\.listen\s*\(/.test(lines[i])) {
+    if (listenRegex.test(lines[i])) {
       listenLineIndex = i;
       break;
     }
@@ -94,7 +95,8 @@ function createFile(filePath, content, force) {
   return { success: true, path: filePath };
 }
 
-function injectBeforeExport(filePath, codeToInject) {
+function injectBeforeExport(filePath, codeToInject, appVarName) {
+  appVarName = appVarName || "app";
   const content = fs.readFileSync(filePath, "utf8");
   const lines = content.split("\n");
 
@@ -147,7 +149,8 @@ function injectBeforeExport(filePath, codeToInject) {
   // Fallback: before app.listen()
   if (insertIndex === -1) {
     for (let i = 0; i < lines.length; i++) {
-      if (/app\.listen\s*\(/.test(lines[i])) {
+      const listenRegex = new RegExp(`${appVarName}\\.listen\\s*\\(`);
+      if (listenRegex.test(lines[i])) {
         insertIndex = i;
         break;
       }
@@ -238,6 +241,187 @@ function writeSummary(changes) {
   return lines.join("\n");
 }
 
+// ─── INJECT SCRIPT TAG INTO FRONTEND FILE ────────────────────────────────────
+
+function injectScriptTag(filePath, fileType, scriptTag, force) {
+  if (!fs.existsSync(filePath)) {
+    return { success: false, reason: "file_not_found" };
+  }
+
+  const content = fs.readFileSync(filePath, "utf8");
+
+  // Already exists check
+  if (content.includes("botversion-loader")) {
+    if (!force) return { success: false, reason: "already_exists" };
+  }
+
+  const backup = backupFile(filePath);
+
+  // ── HTML file — inject before </body> ──────────────────────────────────
+  if (fileType === "html") {
+    if (!content.includes("</body>")) {
+      return { success: false, reason: "no_body_tag" };
+    }
+
+    const newContent = content.replace("</body>", `  ${scriptTag}\n</body>`);
+    fs.writeFileSync(filePath, newContent, "utf8");
+    return { success: true, backup };
+  }
+
+  // ── Next.js _app.js — inject Script component ──────────────────────────
+  if (fileType === "next") {
+    const fileName = path.basename(filePath);
+
+    // pages/_app.js
+    if (fileName.startsWith("_app")) {
+      return injectIntoNextApp(filePath, content, scriptTag, backup);
+    }
+
+    // app/layout.js
+    if (fileName.startsWith("layout")) {
+      return injectIntoNextLayout(filePath, content, scriptTag, backup);
+    }
+  }
+
+  return { success: false, reason: "unsupported_file_type" };
+}
+
+// ─── INJECT INTO NEXT.JS _app.js ─────────────────────────────────────────────
+
+function injectIntoNextApp(filePath, content, scriptTag, backup) {
+  let newContent = content;
+
+  if (!content.includes("next/script")) {
+    newContent = newContent.replace(
+      /^(import .+)/m,
+      `import Script from 'next/script';\n$1`,
+    );
+  }
+
+  const scriptComponent = `
+      <Script
+        id="botversion-loader"
+        src="${extractAttr(scriptTag, "src")}"
+        data-api-url="${extractAttr(scriptTag, "data-api-url")}"
+        data-project-id="${extractAttr(scriptTag, "data-project-id")}"
+        data-public-key="${extractAttr(scriptTag, "data-public-key")}"
+        data-proxy-url="/api/botversion/chat"
+        strategy="afterInteractive"
+      />`;
+
+  const lines = newContent.split("\n");
+
+  // Find ALL return statements and pick the one whose root JSX
+  // is a multi-child wrapper (not a simple single-element return)
+  // Strategy: find the return ( that is followed by the most lines
+  // before its closing ) — that's the main render return
+
+  let bestReturnIndex = -1;
+  let bestRootJsxIndex = -1;
+  let bestLineCount = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*return\s*\(/.test(lines[i])) continue;
+
+    // Find the root JSX tag after this return
+    let rootJsx = -1;
+    for (let j = i + 1; j < lines.length; j++) {
+      const trimmed = lines[j].trim();
+      if (!trimmed) continue;
+      if (trimmed.startsWith("<")) {
+        rootJsx = j;
+        break;
+      }
+      break; // non-empty, non-JSX line means this isn't a JSX return
+    }
+
+    if (rootJsx === -1) continue;
+
+    // Find the closing ) of this return block
+    let depth = 1;
+    let closingLine = -1;
+    for (let j = rootJsx; j < lines.length; j++) {
+      for (const ch of lines[j]) {
+        if (ch === "(") depth++;
+        if (ch === ")") depth--;
+      }
+      if (depth === 0) {
+        closingLine = j;
+        break;
+      }
+    }
+
+    const lineCount = closingLine - i;
+    if (lineCount > bestLineCount) {
+      bestLineCount = lineCount;
+      bestReturnIndex = i;
+      bestRootJsxIndex = rootJsx;
+    }
+  }
+
+  if (bestRootJsxIndex !== -1) {
+    lines.splice(bestRootJsxIndex + 1, 0, scriptComponent);
+    newContent = lines.join("\n");
+  } else {
+    // Final fallback
+    newContent = newContent.replace(
+      /([ \t]*<\/div>\s*\n\s*\))/,
+      `${scriptComponent}\n$1`,
+    );
+  }
+
+  fs.writeFileSync(filePath, newContent, "utf8");
+  return { success: true, backup };
+}
+
+// ─── INJECT INTO NEXT.JS layout.js ───────────────────────────────────────────
+
+function injectIntoNextLayout(filePath, content, scriptTag, backup) {
+  let newContent = content;
+
+  if (!content.includes("next/script")) {
+    newContent = newContent.replace(
+      /^(import .+)/m,
+      `import Script from 'next/script';\n$1`,
+    );
+  }
+
+  const scriptComponent = `
+      <Script
+        id="botversion-loader"
+        src="${extractAttr(scriptTag, "src")}"
+        data-api-url="${extractAttr(scriptTag, "data-api-url")}"
+        data-project-id="${extractAttr(scriptTag, "data-project-id")}"
+        data-public-key="${extractAttr(scriptTag, "data-public-key")}"
+        data-proxy-url="/api/botversion/chat"
+        strategy="afterInteractive"
+      />`;
+
+  // Inject before </body> in layout
+  if (content.includes("</body>")) {
+    newContent = newContent.replace(
+      "</body>",
+      `${scriptComponent}\n      </body>`,
+    );
+  } else {
+    // Fallback — before last closing tag
+    newContent = newContent.replace(
+      /(<\/\w+>\s*\)[\s;]*$)/m,
+      `${scriptComponent}\n      $1`,
+    );
+  }
+
+  fs.writeFileSync(filePath, newContent, "utf8");
+  return { success: true, backup };
+}
+
+// ─── HELPER: extract attribute value from script tag string ──────────────────
+
+function extractAttr(scriptTag, attr) {
+  const match = scriptTag.match(new RegExp(`${attr}="([^"]+)"`));
+  return match ? match[1] : "";
+}
+
 module.exports = {
   writeFile,
   backupFile,
@@ -247,4 +431,5 @@ module.exports = {
   mergeIntoMiddleware,
   writeSummary,
   injectBeforeExport,
+  injectScriptTag,
 };

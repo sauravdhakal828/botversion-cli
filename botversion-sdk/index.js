@@ -61,8 +61,7 @@ var BotVersion = {
 
     this._client = new BotVersionClient({
       apiKey: options.apiKey,
-      platformUrl:
-        options.platformUrl || "https://chatbusiness-two.vercel.app/",
+      platformUrl: options.platformUrl || "http://localhost:3000/",
       debug: options.debug || false,
       timeout: options.timeout || 30000,
     });

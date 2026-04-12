@@ -1,9 +1,24 @@
 // botversion-sdk/cli/detector.js
-
 "use strict";
 
 const fs = require("fs");
 const path = require("path");
+
+// ─── SKIP DIRS (used everywhere) ─────────────────────────────────────────────
+
+const SKIP_DIRS = [
+  "node_modules",
+  ".git",
+  ".next",
+  "dist",
+  "build",
+  ".cache",
+  "coverage",
+  ".turbo",
+  "out",
+  ".output",
+  ".svelte-kit",
+];
 
 // ─── PACKAGE JSON ────────────────────────────────────────────────────────────
 
@@ -17,22 +32,286 @@ function readPackageJson(cwd) {
   }
 }
 
+// ─── SCAN ALL PACKAGE.JSON FILES ─────────────────────────────────────────────
+// Recursively finds ALL package.json files in the project
+
+function scanAllPackageJsons(cwd) {
+  const results = []; // [{ dir, pkg }]
+
+  function walk(currentDir, depth) {
+    if (depth > 5) return;
+
+    let entries;
+    try {
+      entries = fs.readdirSync(currentDir);
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (SKIP_DIRS.includes(entry)) continue;
+
+      const fullPath = path.join(currentDir, entry);
+      let stat;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        continue;
+      }
+
+      if (stat.isDirectory()) {
+        walk(fullPath, depth + 1);
+      } else if (entry === "package.json") {
+        try {
+          const pkg = JSON.parse(fs.readFileSync(fullPath, "utf8"));
+          results.push({ dir: currentDir, pkg });
+        } catch {
+          continue;
+        }
+      }
+    }
+  }
+
+  walk(cwd, 0);
+  return results;
+}
+
+// ─── CLASSIFY PACKAGE.JSON ────────────────────────────────────────────────────
+
+const BACKEND_PACKAGES = [
+  "express",
+  "fastify",
+  "koa",
+  "@nestjs/core",
+  "@hapi/hapi",
+  "restify",
+  "polka",
+  "micro",
+];
+
+const FULLSTACK_PACKAGES = ["next", "@sveltejs/kit"];
+
+const FRONTEND_PACKAGES = [
+  "react",
+  "react-dom",
+  "vue",
+  "@angular/core",
+  "svelte",
+  "@sveltejs/kit",
+  "solid-js",
+  "preact",
+];
+
+function classifyPackageJson(pkg) {
+  if (!pkg) return "unknown";
+
+  const deps = {
+    ...(pkg.dependencies || {}),
+    ...(pkg.devDependencies || {}),
+  };
+
+  const isFullstack = FULLSTACK_PACKAGES.some((p) => !!deps[p]);
+  if (isFullstack) return "fullstack";
+
+  const isBackend = BACKEND_PACKAGES.some((p) => !!deps[p]);
+  const isFrontend = FRONTEND_PACKAGES.some((p) => !!deps[p]);
+
+  if (isBackend && isFrontend) return "fullstack";
+  if (isBackend) return "backend";
+  if (isFrontend) return "frontend";
+  return "unknown";
+}
+
+// ─── DETECT FRONTEND FRAMEWORK ───────────────────────────────────────────────
+
+function detectFrontendFramework(pkg) {
+  if (!pkg) return null;
+
+  const deps = {
+    ...(pkg.dependencies || {}),
+    ...(pkg.devDependencies || {}),
+  };
+
+  if (deps["next"]) return "next";
+  if (deps["@sveltejs/kit"]) return "sveltekit";
+  if (deps["svelte"]) return "svelte";
+  if (deps["@angular/core"]) return "angular";
+  if (deps["vue"]) return "vue";
+  if (deps["react-dom"] || deps["react"]) {
+    // Distinguish CRA vs Vite
+    if (deps["vite"] || deps["@vitejs/plugin-react"]) return "react-vite";
+    return "react-cra";
+  }
+  if (deps["solid-js"]) return "solid";
+  if (deps["preact"]) return "preact";
+
+  return null;
+}
+
+// ─── FIND MAIN FRONTEND FILE ──────────────────────────────────────────────────
+// Returns { file, type } or null
+
+function findMainFrontendFile(dir, pkg) {
+  const framework = detectFrontendFramework(pkg);
+
+  // ── Next.js ───────────────────────────────────────────────────────────────
+  // For Next.js we inject into _app.js (Pages) or layout.js (App Router)
+  if (framework === "next") {
+    const candidates = [
+      "pages/_app.js",
+      "pages/_app.tsx",
+      "pages/_app.ts",
+      "src/pages/_app.js",
+      "src/pages/_app.tsx",
+      "src/pages/_app.ts",
+      "app/layout.js",
+      "app/layout.tsx",
+      "src/app/layout.js",
+      "src/app/layout.tsx",
+    ];
+    for (const candidate of candidates) {
+      const fullPath = path.join(dir, candidate);
+      if (fs.existsSync(fullPath)) {
+        return { file: fullPath, type: "next" };
+      }
+    }
+    return null;
+  }
+
+  // ── Angular ───────────────────────────────────────────────────────────────
+  if (framework === "angular") {
+    const candidate = path.join(dir, "src", "index.html");
+    if (fs.existsSync(candidate)) {
+      return { file: candidate, type: "html" };
+    }
+    return null;
+  }
+
+  // ── React Vite / Vue Vite / Svelte / SvelteKit / Solid / Preact ──────────
+  // All Vite-based projects have index.html in root of the project folder
+  if (
+    framework === "react-vite" ||
+    framework === "vue" ||
+    framework === "svelte" ||
+    framework === "sveltekit" ||
+    framework === "solid" ||
+    framework === "preact"
+  ) {
+    // Check root index.html first
+    const rootHtml = path.join(dir, "index.html");
+    if (fs.existsSync(rootHtml)) {
+      return { file: rootHtml, type: "html" };
+    }
+
+    // Fallback: public/index.html
+    const publicHtml = path.join(dir, "public", "index.html");
+    if (fs.existsSync(publicHtml)) {
+      return { file: publicHtml, type: "html" };
+    }
+
+    return null;
+  }
+
+  // ── React CRA ─────────────────────────────────────────────────────────────
+  if (framework === "react-cra") {
+    // CRA always puts index.html in public/
+    const publicHtml = path.join(dir, "public", "index.html");
+    if (fs.existsSync(publicHtml)) {
+      return { file: publicHtml, type: "html" };
+    }
+
+    // Fallback: root index.html (custom CRA config)
+    const rootHtml = path.join(dir, "index.html");
+    if (fs.existsSync(rootHtml)) {
+      return { file: rootHtml, type: "html" };
+    }
+
+    return null;
+  }
+
+  // ── Unknown frontend — scan for any index.html ────────────────────────────
+  const htmlCandidates = [
+    "index.html",
+    "public/index.html",
+    "src/index.html",
+    "static/index.html",
+    "www/index.html",
+  ];
+
+  for (const candidate of htmlCandidates) {
+    const fullPath = path.join(dir, candidate);
+    if (fs.existsSync(fullPath)) {
+      const content = fs.readFileSync(fullPath, "utf8");
+      // Make sure it's a real HTML file with a body tag
+      if (content.includes("<body") || content.includes("<html")) {
+        return { file: fullPath, type: "html" };
+      }
+    }
+  }
+
+  // Last resort — deep scan for any .html file
+  const found = findHtmlFile(dir);
+  if (found) return { file: found, type: "html" };
+
+  return null;
+}
+
+// ─── DEEP SCAN FOR HTML FILE ─────────────────────────────────────────────────
+
+function findHtmlFile(dir) {
+  function walk(currentDir, depth) {
+    if (depth > 3) return null;
+
+    let entries;
+    try {
+      entries = fs.readdirSync(currentDir);
+    } catch {
+      return null;
+    }
+
+    for (const entry of entries) {
+      if (SKIP_DIRS.includes(entry)) continue;
+
+      const fullPath = path.join(currentDir, entry);
+      let stat;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        continue;
+      }
+
+      if (stat.isDirectory()) {
+        const result = walk(fullPath, depth + 1);
+        if (result) return result;
+      } else if (entry.endsWith(".html")) {
+        try {
+          const content = fs.readFileSync(fullPath, "utf8");
+          if (content.includes("<body") || content.includes("<html")) {
+            return fullPath;
+          }
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  return walk(dir, 0);
+}
+
 // ─── MONOREPO DETECTION ──────────────────────────────────────────────────────
 
 function detectMonorepo(cwd) {
-  const entries = fs.readdirSync(cwd);
-
-  // Check for workspaces in root package.json
   const rootPkg = readPackageJson(cwd);
   if (rootPkg && rootPkg.workspaces) {
-    // Find all workspace package.json files
     const workspaceDirs = [];
     const patterns = Array.isArray(rootPkg.workspaces)
       ? rootPkg.workspaces
       : rootPkg.workspaces.packages || [];
 
     patterns.forEach((pattern) => {
-      // Handle simple patterns like "packages/*"
       const base = pattern.replace(/\/\*$/, "");
       const fullBase = path.join(cwd, base);
       if (fs.existsSync(fullBase)) {
@@ -94,17 +373,12 @@ function detectFramework(pkg) {
     ...(pkg.devDependencies || {}),
   };
 
-  // Check unsupported first so we can warn clearly
   for (const fw of UNSUPPORTED_FRAMEWORKS) {
-    if (deps[fw]) {
-      return { name: fw, supported: false };
-    }
+    if (deps[fw]) return { name: fw, supported: false };
   }
 
   for (const fw of SUPPORTED_FRAMEWORKS) {
-    if (deps[fw]) {
-      return { name: fw, supported: true };
-    }
+    if (deps[fw]) return { name: fw, supported: true };
   }
 
   return { name: null, supported: false };
@@ -131,7 +405,6 @@ function readTsConfig(cwd) {
   if (!fs.existsSync(tsconfigPath)) return null;
   try {
     const raw = fs.readFileSync(tsconfigPath, "utf8");
-    // Strip comments — tsconfig supports JSON with comments
     const stripped = raw
       .replace(/\/\/.*$/gm, "")
       .replace(/\/\*[\s\S]*?\*\//g, "");
@@ -141,11 +414,6 @@ function readTsConfig(cwd) {
   }
 }
 
-// Decide whether to generate .ts or .js files
-// - Not TypeScript → always .js
-// - TypeScript + allowJs: true (Next.js default) → .js is fine
-// - TypeScript + allowJs: false (manually set by user) → must use .ts
-// - TypeScript + allowJs not set → Next.js default is true → .js is fine
 function shouldGenerateTs(cwd, isTypeScript) {
   if (!isTypeScript) return false;
   const tsconfig = readTsConfig(cwd);
@@ -179,7 +447,6 @@ function detectNextRouter(cwd) {
     pagesRouter: hasPages,
     appRouter: hasApp,
     srcDir: hasSrc,
-    // Resolve the actual base directory
     baseDir: hasSrc ? path.join(cwd, "src") : cwd,
   };
 }
@@ -209,7 +476,6 @@ function detectExpressEntry(cwd, pkg) {
     const scripts = [pkg.scripts.start, pkg.scripts.dev, pkg.scripts.serve];
     for (const script of scripts) {
       if (!script) continue;
-      // e.g. "node server.js" or "nodemon src/index.js" or "ts-node index.ts"
       const match = script.match(
         /(?:node|nodemon|ts-node|tsx)\s+([^\s]+\.(js|ts))/,
       );
@@ -220,7 +486,7 @@ function detectExpressEntry(cwd, pkg) {
     }
   }
 
-  // Strategy 3: common file names in root and src/
+  // Strategy 3: common file names
   const candidates = [
     "server.js",
     "server.ts",
@@ -243,7 +509,6 @@ function detectExpressEntry(cwd, pkg) {
   for (const candidate of candidates) {
     const filePath = path.join(cwd, candidate);
     if (fs.existsSync(filePath)) {
-      // Verify it actually contains express
       const content = fs.readFileSync(filePath, "utf8");
       if (content.includes("express") || content.includes("app.listen")) {
         return filePath;
@@ -252,17 +517,19 @@ function detectExpressEntry(cwd, pkg) {
   }
 
   // Strategy 4: any .js/.ts file containing app.listen()
-  return findFileWithContent(cwd, "app.listen", [".js", ".ts"], 2);
+  return findFileWithContent(cwd, ".listen(", [".js", ".ts"], 2);
 }
 
 // ─── app.listen() LOCATION ───────────────────────────────────────────────────
 
-function findListenCall(filePath) {
+function findListenCall(filePath, appVarName) {
+  appVarName = appVarName || "app";
   const content = fs.readFileSync(filePath, "utf8");
   const lines = content.split("\n");
+  const regex = new RegExp(`${appVarName}\\.listen\\s*\\(`);
 
   for (let i = 0; i < lines.length; i++) {
-    if (/app\.listen\s*\(/.test(lines[i])) {
+    if (regex.test(lines[i])) {
       return { lineIndex: i, lineNumber: i + 1, content: lines[i] };
     }
   }
@@ -280,12 +547,14 @@ function findModuleExportsApp(filePath) {
   return null;
 }
 
-function findListenInsideCallback(filePath) {
+function findListenInsideCallback(filePath, appVarName) {
+  appVarName = appVarName || "app";
   const content = fs.readFileSync(filePath, "utf8");
   const lines = content.split("\n");
+  const regex = new RegExp(`${appVarName}\\.listen\\s*\\(`);
+
   for (let i = 0; i < lines.length; i++) {
-    if (/app\.listen\s*\(/.test(lines[i])) {
-      // Check if it's inside a callback (indented or preceded by .then)
+    if (regex.test(lines[i])) {
       const indentation = lines[i].match(/^(\s*)/)[1].length;
       if (indentation > 0) {
         return { lineIndex: i, lineNumber: i + 1, insideCallback: true };
@@ -392,12 +661,7 @@ function detectAuth(pkg) {
         "jwt",
         "express-session",
       ].includes(lib.name);
-      return {
-        name: lib.name,
-        version,
-        package: pkg2,
-        supported,
-      };
+      return { name: lib.name, version, package: pkg2, supported };
     }
   }
 
@@ -407,7 +671,6 @@ function detectAuth(pkg) {
 // ─── NEXT-AUTH CONFIG LOCATION ───────────────────────────────────────────────
 
 function findNextAuthConfig(cwd) {
-  // Common locations for authOptions
   const candidates = [
     "pages/api/auth/[...nextauth].js",
     "pages/api/auth/[...nextauth].ts",
@@ -424,7 +687,7 @@ function findNextAuthConfig(cwd) {
     "utils/auth.js",
     "utils/auth.ts",
     "auth.js",
-    "auth.ts", // next-auth v5
+    "auth.ts",
   ];
 
   for (const candidate of candidates) {
@@ -434,13 +697,9 @@ function findNextAuthConfig(cwd) {
     }
   }
 
-  // Search for authOptions in files
   const found = findFileWithContent(cwd, "authOptions", [".js", ".ts"], 3);
   if (found) {
-    return {
-      path: found,
-      relativePath: path.relative(cwd, found),
-    };
+    return { path: found, relativePath: path.relative(cwd, found) };
   }
 
   return null;
@@ -471,16 +730,6 @@ function findFileWithContent(dir, searchString, extensions, maxDepth) {
   function walk(currentDir, depth) {
     if (depth > maxDepth) return null;
 
-    // Skip node_modules, .git, .next, dist, build
-    const skipDirs = [
-      "node_modules",
-      ".git",
-      ".next",
-      "dist",
-      "build",
-      ".cache",
-    ];
-
     let entries;
     try {
       entries = fs.readdirSync(currentDir);
@@ -489,7 +738,7 @@ function findFileWithContent(dir, searchString, extensions, maxDepth) {
     }
 
     for (const entry of entries) {
-      if (skipDirs.includes(entry)) continue;
+      if (SKIP_DIRS.includes(entry)) continue;
 
       const fullPath = path.join(currentDir, entry);
       let stat;
@@ -523,7 +772,7 @@ function detectAppVarName(filePath) {
     const content = fs.readFileSync(filePath, "utf8");
     const match = content.match(/(?:const|let|var)\s+(\w+)\s*=\s*express\s*\(/);
     return match ? match[1] : "app";
-  } catch (e) {
+  } catch {
     return "app";
   }
 }
@@ -533,18 +782,88 @@ function detectAppVarName(filePath) {
 function detect(cwd) {
   const pkg = readPackageJson(cwd);
   const monorepo = detectMonorepo(cwd);
-  const framework = detectFramework(pkg);
-  const moduleSystem = detectModuleSystem(pkg);
-  const isTypeScript = detectTypeScript(cwd);
-  const hasSrc = detectSrcDir(cwd);
-  const auth = detectAuth(pkg);
-  const packageManager = detectPackageManager(cwd);
+  let framework = detectFramework(pkg);
 
-  const generateTs = shouldGenerateTs(cwd, isTypeScript);
+  // ── If framework not found in root, scan ALL package.json files ───────────
+  let backendDir = cwd;
+  let frontendDir = null;
+  let frontendPkg = null;
+
+  if (!framework.name) {
+    const allPackages = scanAllPackageJsons(cwd);
+
+    for (const { dir, pkg: subPkg } of allPackages) {
+      // Skip the root package.json — already checked
+      if (dir === cwd) continue;
+
+      const classification = classifyPackageJson(subPkg);
+
+      // AFTER
+      if (
+        (classification === "backend" || classification === "fullstack") &&
+        !framework.name
+      ) {
+        framework = detectFramework(subPkg);
+        backendDir = dir;
+      }
+
+      if (
+        (classification === "frontend" || classification === "fullstack") &&
+        !frontendDir &&
+        dir !== backendDir
+      ) {
+        frontendDir = dir;
+        frontendPkg = subPkg;
+      }
+    }
+  } else {
+    // Framework found in root — scan for separate frontend folder
+    const allPackages = scanAllPackageJsons(cwd);
+    for (const { dir, pkg: subPkg } of allPackages) {
+      if (dir === cwd) continue;
+      if (dir === backendDir) continue;
+      const classification = classifyPackageJson(subPkg);
+      if (classification === "frontend" || classification === "fullstack") {
+        frontendDir = dir;
+        frontendPkg = subPkg;
+        break;
+      }
+    }
+  }
+
+  // ── Use backendDir for all backend-specific detection ─────────────────────
+  // Guard: if frontendDir ended up being the same as backendDir
+  // (e.g. a fullstack Next.js folder detected as both), clear frontendDir
+  // so we don't try to inject script tag into the wrong place
+  if (frontendDir && frontendDir === backendDir) {
+    frontendDir = null;
+    frontendPkg = null;
+  }
+  const backendPkg = readPackageJson(backendDir) || pkg;
+  const moduleSystem = detectModuleSystem(backendPkg);
+  const isTypeScript = detectTypeScript(backendDir);
+  const hasSrc = detectSrcDir(backendDir);
+  const auth = detectAuth(backendPkg);
+  const generateTs = shouldGenerateTs(backendDir, isTypeScript);
+
+  // ── Find frontend main file ───────────────────────────────────────────────
+  let frontendMainFile = null;
+  if (frontendDir && frontendPkg) {
+    frontendMainFile = findMainFrontendFile(frontendDir, frontendPkg);
+  } else if (framework.name === "next") {
+    // Next.js is fullstack — find its frontend file in backendDir
+    frontendMainFile = findMainFrontendFile(backendDir, backendPkg);
+  }
+
+  const packageManager =
+    detectPackageManager(backendDir) !== "npm"
+      ? detectPackageManager(backendDir)
+      : detectPackageManager(cwd);
 
   const result = {
-    cwd,
-    pkg,
+    cwd: backendDir, // use backend dir as working dir
+    rootCwd: cwd, // keep original root for reference
+    pkg: backendPkg,
     monorepo,
     framework,
     moduleSystem,
@@ -553,30 +872,34 @@ function detect(cwd) {
     hasSrc,
     auth,
     packageManager,
-    // generateTs: true means user has allowJs:false — must use .ts
-    // generateTs: false means .js files are fine (most users)
     ext: generateTs ? ".ts" : ".js",
+    // Frontend info
+    frontendDir,
+    frontendPkg,
+    frontendMainFile,
   };
 
-  // Framework-specific detection
+  // ── Framework-specific detection ──────────────────────────────────────────
   if (framework.name === "next") {
-    result.next = detectNextRouter(cwd);
-    result.nextVersion = detectNextVersion(pkg);
+    result.next = detectNextRouter(backendDir);
+    result.nextVersion = detectNextVersion(backendPkg);
     if (auth.name === "next-auth") {
-      result.nextAuthConfig = findNextAuthConfig(cwd);
+      result.nextAuthConfig = findNextAuthConfig(backendDir);
     }
   }
 
   if (framework.name === "express") {
-    result.entryPoint = detectExpressEntry(cwd, pkg);
+    result.entryPoint = detectExpressEntry(backendDir, backendPkg);
     if (result.entryPoint) {
-      result.listenCall = findListenCall(result.entryPoint);
+      result.appVarName = detectAppVarName(result.entryPoint); // detect FIRST
+      result.listenCall = findListenCall(result.entryPoint, result.appVarName);
+      result.listenInsideCallback = findListenInsideCallback(
+        result.entryPoint,
+        result.appVarName,
+      );
       result.moduleExportsApp = findModuleExportsApp(result.entryPoint);
-      result.listenInsideCallback = findListenInsideCallback(result.entryPoint);
       result.createServer = findCreateServer(result.entryPoint);
-      result.appVarName = detectAppVarName(result.entryPoint);
 
-      // Also check for app file separately (pattern 2)
       const appFileCandidates = [
         "src/app.js",
         "src/app.ts",
@@ -584,7 +907,7 @@ function detect(cwd) {
         "app.ts",
       ];
       for (const candidate of appFileCandidates) {
-        const fullPath = path.join(cwd, candidate);
+        const fullPath = path.join(backendDir, candidate);
         if (fs.existsSync(fullPath) && fullPath !== result.entryPoint) {
           const exportCall = findModuleExportsApp(fullPath);
           if (exportCall) {
@@ -597,13 +920,14 @@ function detect(cwd) {
     }
   }
 
+  // ── Already initialized check ─────────────────────────────────────────────
   result.alreadyInitialized =
     detectExistingBotVersion(result.entryPoint) ||
     (framework.name === "next" &&
-      (fs.existsSync(path.join(cwd, "instrumentation.js")) ||
-        fs.existsSync(path.join(cwd, "instrumentation.ts")) ||
-        fs.existsSync(path.join(cwd, "src", "instrumentation.js")) ||
-        fs.existsSync(path.join(cwd, "src", "instrumentation.ts"))));
+      (fs.existsSync(path.join(backendDir, "instrumentation.js")) ||
+        fs.existsSync(path.join(backendDir, "instrumentation.ts")) ||
+        fs.existsSync(path.join(backendDir, "src", "instrumentation.js")) ||
+        fs.existsSync(path.join(backendDir, "src", "instrumentation.ts"))));
 
   return result;
 }
@@ -611,6 +935,10 @@ function detect(cwd) {
 module.exports = {
   detect,
   readPackageJson,
+  scanAllPackageJsons,
+  classifyPackageJson,
+  detectFrontendFramework,
+  findMainFrontendFile,
   detectMonorepo,
   detectFramework,
   detectModuleSystem,
