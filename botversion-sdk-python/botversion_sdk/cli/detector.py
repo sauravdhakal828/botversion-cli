@@ -44,24 +44,106 @@ def read_requirements(cwd):
         try:
             with open(pyproject_path, "r", encoding="utf-8") as f:
                 content = f.read()
-            # Extract dependencies section
+
+            # ── Format 1: List format (standard pyproject.toml) ──────────────
+            # dependencies = [
+            #     "fastapi[standard]<1.0.0,>=0.114.2",
+            # ]
             in_deps = False
             for line in content.split("\n"):
-                line = line.strip()
-                if line in ("[tool.poetry.dependencies]", "[project.dependencies]", "[dependencies]"):
+                stripped = line.strip()
+
+                if stripped == "dependencies = [" or stripped == "dependencies=[":
                     in_deps = True
                     continue
-                if line.startswith("[") and in_deps:
-                    in_deps = False
-                if in_deps and "=" in line:
-                    parts = line.split("=", 1)
+    
+                if in_deps:
+                    if stripped == "]":
+                        in_deps = False
+                        continue
+                    # Parse quoted package name — strip extras like [standard]
+                    match = re.match(r'^["\']([a-zA-Z0-9_\-\.]+)', stripped)
+                    if match:
+                        name = match.group(1).lower().replace("-", "_")
+                        packages[name] = ""
+
+            # ── Format 2: Key-value format (Poetry) ──────────────────────────
+            # [tool.poetry.dependencies]
+            # fastapi = "^0.100.0"
+            in_poetry_deps = False
+            for line in content.split("\n"):
+                stripped = line.strip()
+                if stripped in ("[tool.poetry.dependencies]", "[project.dependencies]"):
+                    in_poetry_deps = True
+                    continue
+                if stripped.startswith("[") and in_poetry_deps:
+                    in_poetry_deps = False
+                if in_poetry_deps and "=" in stripped:
+                    parts = stripped.split("=", 1)
                     name = parts[0].strip().strip('"').lower().replace("-", "_")
-                    version = parts[1].strip().strip('"')
-                    packages[name] = version
+                    packages[name] = parts[1].strip().strip('"')
+
         except Exception:
             pass
 
     return packages
+
+
+def find_backend_root(cwd):
+    """
+    If requirements.txt / pyproject.toml is not in cwd,
+    scan one level of subdirectories to find it.
+    Returns the folder that contains it, or cwd as fallback.
+    """
+
+    def has_real_dependencies(toml_path):
+        """
+        Checks if a pyproject.toml actually contains dependencies
+        and is not just a workspace config file.
+        """
+        try:
+            with open(toml_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            return "dependencies" in content and (
+                "[project]" in content or
+                "[tool.poetry.dependencies]" in content or
+                "[tool.poetry]" in content
+            )
+        except Exception:
+            return False
+
+    # Check root first
+    if os.path.exists(os.path.join(cwd, "requirements.txt")):
+        return cwd
+
+    if os.path.exists(os.path.join(cwd, "pyproject.toml")):
+        if has_real_dependencies(os.path.join(cwd, "pyproject.toml")):
+            return cwd
+        # Falls through to scan subdirectories
+
+    # Scan one level deep
+    try:
+        for entry in os.listdir(cwd):
+            full_path = os.path.join(cwd, entry)
+            if not os.path.isdir(full_path):
+                continue
+            # Skip obvious non-backend folders
+            if entry in ("node_modules", ".git", "__pycache__", ".venv",
+                         "venv", "env", "dist", "build", "frontend",
+                         "client", "static", "media", "public"):
+                continue
+            # Check requirements.txt
+            if os.path.exists(os.path.join(full_path, "requirements.txt")):
+                return full_path
+            # Check pyproject.toml with actual dependencies
+            pyproject = os.path.join(full_path, "pyproject.toml")
+            if os.path.exists(pyproject):
+                if has_real_dependencies(pyproject):
+                    return full_path
+    except Exception:
+        pass
+
+    return cwd  # fallback — no change in behavior
 
 
 # ── Framework detection ───────────────────────────────────────────────────────
@@ -102,16 +184,27 @@ def detect_entry_point(cwd, framework):
         "main.py",
         "app.py",
         "server.py",
-        "wsgi.py",
+        "wsgi.py",          # ← wsgi files first
         "asgi.py",
         "application.py",
         "run.py",
-        "manage.py",
         "src/main.py",
         "src/app.py",
         "src/server.py",
         "src/wsgi.py",
         "src/asgi.py",
+        # ── Common Django project folder patterns ──
+        "backend/wsgi.py",
+        "backend/asgi.py",
+        "app/wsgi.py",
+        "app/asgi.py",
+        "config/wsgi.py",
+        "config/asgi.py",
+        "core/wsgi.py",
+        "core/asgi.py",
+        "project/wsgi.py",
+        "project/asgi.py",
+        "manage.py",
     ]
 
     # Framework-specific search strings
@@ -212,6 +305,38 @@ def find_app_var_name(file_path, framework):
 # ── Auth detection ────────────────────────────────────────────────────────────
 
 AUTH_LIBS = [
+    # ── FastAPI ───────────────────────────────────────────────────────────────
+    {
+        "name": "fastapi_users",
+        "packages": ["fastapi_users", "fastapi-users"],
+        "supported": True,
+    },
+    {
+        "name": "pyjwt",
+        "packages": ["pyjwt", "PyJWT"],
+        "supported": True,
+    },
+    {
+        "name": "python_jose",
+        "packages": ["python_jose", "python-jose"],
+        "supported": True,
+    },
+    {
+        "name": "authx",
+        "packages": ["authx"],
+        "supported": True,
+    },
+    {
+        "name": "fastapi_jwt_auth",
+        "packages": ["fastapi_jwt_auth", "fastapi-jwt-auth"],
+        "supported": True,
+    },
+    {
+        "name": "fastapi_security",
+        "packages": ["fastapi_security", "fastapi-security"],
+        "supported": True,
+    },
+    # ── Flask ─────────────────────────────────────────────────────────────────
     {
         "name": "flask_login",
         "packages": ["flask_login", "flask-login"],
@@ -223,6 +348,22 @@ AUTH_LIBS = [
         "supported": True,
     },
     {
+        "name": "flask_security",
+        "packages": ["flask_security", "flask-security"],
+        "supported": True,
+    },
+    {
+        "name": "flask_praetorian",
+        "packages": ["flask_praetorian", "flask-praetorian"],
+        "supported": True,
+    },
+    {
+        "name": "flask_httpauth",
+        "packages": ["flask_httpauth", "flask-httpauth"],
+        "supported": True,
+    },
+    # ── Django ────────────────────────────────────────────────────────────────
+    {
         "name": "django_allauth",
         "packages": ["django_allauth", "django-allauth"],
         "supported": True,
@@ -233,23 +374,39 @@ AUTH_LIBS = [
         "supported": True,
     },
     {
-        "name": "python_jose",
-        "packages": ["python_jose", "python-jose"],
-        "supported": True,
-    },
-    {
-        "name": "authlib",
-        "packages": ["authlib"],
-        "supported": False,
-    },
-    {
         "name": "django_rest_framework",
         "packages": ["djangorestframework", "rest_framework"],
         "supported": True,
     },
     {
-        "name": "fastapi_users",
-        "packages": ["fastapi_users", "fastapi-users"],
+        "name": "django_oauth_toolkit",
+        "packages": ["django_oauth_toolkit", "django-oauth-toolkit"],
+        "supported": True,
+    },
+    {
+        "name": "dj_rest_auth",
+        "packages": ["dj_rest_auth", "dj-rest-auth"],
+        "supported": True,
+    },
+    # ── General / Multi-framework ─────────────────────────────────────────────
+    {
+        "name": "authlib",
+        "packages": ["authlib"],
+        "supported": True,
+    },
+    {
+        "name": "joserfc",
+        "packages": ["joserfc"],
+        "supported": True,
+    },
+    {
+        "name": "passlib",
+        "packages": ["passlib"],
+        "supported": True,
+    },
+    {
+        "name": "itsdangerous",
+        "packages": ["itsdangerous"],
         "supported": True,
     },
 ]
@@ -283,6 +440,7 @@ def find_django_settings(cwd):
     """
     candidates = [
         "settings.py",
+        "backend/settings.py",
         "config/settings.py",
         "config/settings/base.py",
         "config/settings/development.py",
@@ -615,18 +773,18 @@ def find_html_file(directory):
 # ── Main detect function ──────────────────────────────────────────────────────
 
 def detect(cwd):
-    """
-    Master detection function — runs all detectors and returns one result dict.
-    Mirrors JS detect()
-    """
-    packages = read_requirements(cwd)
+    # Find where the backend actually lives (handles frontend/backend split)
+    backend_root = find_backend_root(cwd)
+    
+    packages = read_requirements(backend_root)  # ← backend_root
     framework = detect_framework(packages)
     auth = detect_auth(packages)
-    virtualenv = detect_virtualenv(cwd)
-    has_src = detect_src_dir(cwd)
+    virtualenv = detect_virtualenv(backend_root)  # ← backend_root
+    has_src = detect_src_dir(backend_root)  # ← backend_root
 
     result = {
         "cwd": cwd,
+        "backend_root": backend_root,
         "packages": packages,
         "framework": framework,
         "auth": auth,
@@ -636,14 +794,14 @@ def detect(cwd):
 
     # ── Framework-specific detection ──────────────────────────────────────────
     if framework["name"] in ("fastapi", "flask"):
-        result["entry_point"] = detect_entry_point(cwd, framework["name"])
+        result["entry_point"] = detect_entry_point(backend_root, framework["name"])
         if result["entry_point"]:
             result["run_call"] = find_run_call(result["entry_point"], framework["name"])
             result["app_var_name"] = find_app_var_name(result["entry_point"], framework["name"])
 
     elif framework["name"] == "django":
-        result["entry_point"] = detect_entry_point(cwd, "django")
-        result["django_settings"] = find_django_settings(cwd)
+        result["entry_point"] = detect_entry_point(backend_root, "django")
+        result["django_settings"] = find_django_settings(backend_root)
         result["run_call"] = None
 
     # ── Frontend detection ────────────────────────────────────────────────────

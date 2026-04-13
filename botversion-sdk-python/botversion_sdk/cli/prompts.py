@@ -75,18 +75,24 @@ def prompt_auth_library(framework):
     Shows list of supported Python auth libraries to pick from.
     Mirrors JS promptAuthLibrary()
     """
-    # Common choices per framework
     if framework == "flask":
         choices = [
             {"label": "Flask-Login", "value": {"name": "flask_login", "supported": True}},
             {"label": "Flask-JWT-Extended", "value": {"name": "flask_jwt_extended", "supported": True}},
+            {"label": "Flask-Security", "value": {"name": "flask_security", "supported": True}},
+            {"label": "Flask-Praetorian", "value": {"name": "flask_praetorian", "supported": True}},
+            {"label": "Flask-HTTPAuth", "value": {"name": "flask_httpauth", "supported": True}},
             {"label": "Other / Custom", "value": {"name": "custom", "supported": False}},
             {"label": "No auth", "value": {"name": None, "supported": False}},
         ]
     elif framework == "fastapi":
         choices = [
             {"label": "FastAPI Users", "value": {"name": "fastapi_users", "supported": True}},
+            {"label": "PyJWT", "value": {"name": "pyjwt", "supported": True}},
             {"label": "python-jose (JWT)", "value": {"name": "python_jose", "supported": True}},
+            {"label": "AuthX", "value": {"name": "authx", "supported": True}},
+            {"label": "fastapi-jwt-auth", "value": {"name": "fastapi_jwt_auth", "supported": True}},
+            {"label": "Authlib", "value": {"name": "authlib", "supported": True}},
             {"label": "Other / Custom", "value": {"name": "custom", "supported": False}},
             {"label": "No auth", "value": {"name": None, "supported": False}},
         ]
@@ -95,11 +101,15 @@ def prompt_auth_library(framework):
             {"label": "Django built-in auth", "value": {"name": "django_allauth", "supported": True}},
             {"label": "Django REST Framework", "value": {"name": "django_rest_framework", "supported": True}},
             {"label": "djangorestframework-simplejwt", "value": {"name": "djangorestframework_simplejwt", "supported": True}},
+            {"label": "dj-rest-auth", "value": {"name": "dj_rest_auth", "supported": True}},
+            {"label": "Django OAuth Toolkit", "value": {"name": "django_oauth_toolkit", "supported": True}},
             {"label": "Other / Custom", "value": {"name": "custom", "supported": False}},
             {"label": "No auth", "value": {"name": None, "supported": False}},
         ]
     else:
         choices = [
+            {"label": "PyJWT", "value": {"name": "pyjwt", "supported": True}},
+            {"label": "Authlib", "value": {"name": "authlib", "supported": True}},
             {"label": "Other / Custom", "value": {"name": "custom", "supported": False}},
             {"label": "No auth", "value": {"name": None, "supported": False}},
         ]

@@ -12,7 +12,8 @@ const url = require("url");
 function BotVersionClient(options) {
   this.apiKey = options.apiKey;
   this.chatbotId = options.chatbotId;
-  this.platformUrl = options.platformUrl || "http://localhost:3000";
+  this.platformUrl =
+    options.platformUrl || "https://chatbusiness-two.vercel.app";
   this.debug = options.debug || false;
   this.timeout = options.timeout || 30000;
 

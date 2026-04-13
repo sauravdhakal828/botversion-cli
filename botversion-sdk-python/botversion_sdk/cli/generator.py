@@ -79,7 +79,7 @@ def generate_django_init(info, api_key):
     user_context = generate_user_context(auth, "django")
 
     init_block = f"""
-
+# BotVersion AI Agent — auto-added by botversion-sdk init
 botversion_sdk.init(
     api_key=os.environ.get("BOTVERSION_API_KEY"),{user_context}
 )
@@ -94,16 +94,15 @@ botversion_sdk.init(
 # ── Django urls.py chat route ─────────────────────────────────────────────────
 
 def generate_django_chat_url():
-    return '    path("api/botversion/chat/", botversion_sdk.chat_handler("django")),'
+    return (
+        "import botversion_sdk\n"
+        '    path("api/botversion/chat/", botversion_sdk.chat_handler("django")),'
+    )
 
 
 # ── Django wsgi.py / asgi.py init block ──────────────────────────────────────
 
 def generate_django_wsgi_init(info, api_key):
-    """
-    Generates the init block to inject into wsgi.py or asgi.py.
-    Django needs init after application = get_wsgi_application()
-    """
     auth = info.get("auth", {})
     user_context = generate_user_context(auth, "django")
 
@@ -126,14 +125,50 @@ def generate_user_context(auth, framework):
     Mirrors JS generateExpressUserContext()
     """
     if not auth or not auth.get("name"):
-        return """
-    # get_user_context=lambda request: request.state.user,  # FastAPI
-    # get_user_context=lambda request: g.user,              # Flask
-    # get_user_context=lambda request: request.user,        # Django"""
+        if framework == "fastapi":
+            return """
+    # get_user_context=lambda request: request.state.user,"""
+        elif framework == "flask":
+            return """
+    # get_user_context=lambda request: g.user,"""
+        elif framework == "django":
+            return """
+    # get_user_context=lambda request: request.user,"""
+        return ""
 
     name = auth.get("name", "")
 
-    if name == "flask_login":
+    # ── FastAPI ───────────────────────────────────────────────────────────────
+    if name == "fastapi_users":
+        return """
+    get_user_context=lambda request: request.state.user,"""
+
+    elif name == "pyjwt":
+        if framework == "flask":
+            return """
+    get_user_context=lambda request: g.user,"""
+        else:
+            return """
+    get_user_context=lambda request: request.state.user,"""
+
+    elif name == "python_jose":
+        return """
+    # get_user_context=lambda request: decode_token(request),"""
+
+    elif name == "authx":
+        return """
+    get_user_context=lambda request: request.state.user,"""
+
+    elif name == "fastapi_jwt_auth":
+        return """
+    get_user_context=lambda request: request.state.user,"""
+
+    elif name == "fastapi_security":
+        return """
+    get_user_context=lambda request: request.state.user,"""
+
+    # ── Flask ─────────────────────────────────────────────────────────────────
+    elif name == "flask_login":
         return """
     get_user_context=lambda request: current_user,"""
 
@@ -141,7 +176,20 @@ def generate_user_context(auth, framework):
         return """
     get_user_context=lambda request: get_jwt_identity(),"""
 
-    elif name == "django_allauth" or name == "django_rest_framework":
+    elif name == "flask_security":
+        return """
+    get_user_context=lambda request: current_user,"""
+
+    elif name == "flask_praetorian":
+        return """
+    get_user_context=lambda request: flask_praetorian.current_user(),"""
+
+    elif name == "flask_httpauth":
+        return """
+    get_user_context=lambda request: auth.current_user(),"""
+
+    # ── Django ────────────────────────────────────────────────────────────────
+    elif name == "django_allauth":
         return """
     get_user_context=lambda request: request.user,"""
 
@@ -149,17 +197,46 @@ def generate_user_context(auth, framework):
         return """
     get_user_context=lambda request: request.user,"""
 
-    elif name == "python_jose":
+    elif name == "django_rest_framework":
         return """
-    # get_user_context=lambda request: decode_token(request),"""
+    get_user_context=lambda request: request.user,"""
 
-    elif name == "fastapi_users":
+    elif name == "django_oauth_toolkit":
+        return """
+    get_user_context=lambda request: request.user,"""
+
+    elif name == "dj_rest_auth":
+        return """
+    get_user_context=lambda request: request.user,"""
+
+    # ── General ───────────────────────────────────────────────────────────────
+    elif name == "authlib":
+        return """
+    # get_user_context=lambda request: request.state.user,"""
+
+    elif name == "joserfc":
         return """
     get_user_context=lambda request: request.state.user,"""
 
-    else:
+    elif name == "passlib":
         return """
     # get_user_context=lambda request: request.state.user,"""
+
+    elif name == "itsdangerous":
+        return """
+    # get_user_context=lambda request: request.state.user,"""
+
+    else:
+        if framework == "fastapi":
+            return """
+    # get_user_context=lambda request: request.state.user,"""
+        elif framework == "flask":
+            return """
+    # get_user_context=lambda request: g.user,"""
+        elif framework == "django":
+            return """
+    # get_user_context=lambda request: request.user,"""
+        return ""
 
 
 # ── Manual instructions for unsupported frameworks ────────────────────────────

@@ -366,7 +366,7 @@ export async function POST(req${typeAnnotation}) {
     };
 
     // Forward to BotVersion platform directly
-    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'http://localhost:3000'}/api/chatbot/widget-chat\`, {
+    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'https://chatbusiness-two.vercel.app'}/api/chatbot/widget-chat\`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -405,7 +405,7 @@ export async function POST(req${typeAnnotation}) {
     const { userId } = await auth();
     const body = await req.json();
 
-    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'http://localhost:3000'}/api/chatbot/widget-chat\`, {
+    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'https://chatbusiness-two.vercel.app'}/api/chatbot/widget-chat\`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -444,7 +444,7 @@ export async function POST(req${typeAnnotation}) {
     const { data: { session } } = await supabase.auth.getSession();
     const body = await req.json();
 
-    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'http://localhost:3000'}/api/chatbot/widget-chat\`, {
+    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'https://chatbusiness-two.vercel.app'}/api/chatbot/widget-chat\`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -491,7 +491,7 @@ export async function POST(req${typeAnnotation}) {
     // Add userContext here if needed:
     // const userContext = { userId: '...', email: '...' };
 
-    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'http://localhost:3000'}/api/chatbot/widget-chat\`, {
+    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'https://chatbusiness-two.vercel.app'}/api/chatbot/widget-chat\`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

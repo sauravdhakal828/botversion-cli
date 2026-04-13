@@ -36,17 +36,52 @@ def backup_file(file_path):
     return backup_path
 
 
+def append_to_file(file_path, code_to_append):
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        return {"success": False, "reason": "read_error", "error": str(e)}
+
+    if "botversion_sdk" in content or "botversion-sdk" in content:
+        return {"success": False, "reason": "already_exists"}
+
+    # ── Backup FIRST before any changes ──────────────────────────────────
+    backup = backup_file(file_path)
+
+    # ── Split import lines from non-import lines ──────────────────────────
+    import_lines = []
+    non_import_lines = []
+
+    for line in code_to_append.split("\n"):
+        stripped = line.strip()
+        if (stripped.startswith("import ") or stripped.startswith("from ")) and not line.startswith(" ") and not line.startswith("\t"):
+            import_lines.append(line)
+        else:
+            non_import_lines.append(line)
+
+    # ── Inject imports at the top first ──────────────────────────────────
+    for imp in import_lines:
+        if imp.strip() and imp.strip() not in content:
+            inject_import(file_path, imp.strip())
+
+    # ── Re-read file after import injection ──────────────────────────────
+    with open(file_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # ── Append non-import lines to end of file ────────────────────────────
+    init_block = "\n".join(non_import_lines).strip()
+    if init_block:
+        new_content = content.rstrip() + "\n\n" + init_block + "\n"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+    return {"success": True, "backup": backup}
+
+
 # ── Inject code before app.run() / uvicorn.run() ─────────────────────────────
 
 def inject_before_run(file_path, code_to_inject, framework):
-    """
-    Finds the server run call and injects code right before it.
-    Mirrors JS injectBeforeListen()
-
-    Flask:   app.run(
-    FastAPI: uvicorn.run(
-    Django:  application = get_wsgi_application()
-    """
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -57,11 +92,38 @@ def inject_before_run(file_path, code_to_inject, framework):
     if "botversion_sdk" in content or "botversion-sdk" in content:
         return {"success": False, "reason": "already_exists"}
 
+    # Backup FIRST before any changes
+    backup = backup_file(file_path)
+
+    # Split imports from non-import lines
+    import_lines = []
+    non_import_lines = []
+
+    for line in code_to_inject.split("\n"):
+        stripped = line.strip()
+        # Only treat as a top-level import if it has no indentation
+        if (stripped.startswith("import ") or stripped.startswith("from ")) and not line.startswith(" ") and not line.startswith("\t"):
+            import_lines.append(line)
+        else:
+            non_import_lines.append(line)
+
+    # Inject imports at the top of the file first
+    for imp in import_lines:
+        if imp.strip() and imp.strip() not in content:
+            inject_import(file_path, imp.strip())
+
+    # Re-read file after import injection
+    with open(file_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Use only non-import lines as the actual code block to inject
+    code_to_inject = "\n".join(non_import_lines)
+
     lines = content.split("\n")
 
     # Pattern to find run call per framework
     patterns = {
-        "flask": r"app\.run\s*\(",
+        "flask": r"if\s+__name__\s*==\s*['\"]__main__['\"]",
         "fastapi": r"uvicorn\.run\s*\(",
         "django": r"(application|app)\s*=\s*get_(wsgi|asgi)_application\s*\(",
     }
@@ -84,7 +146,6 @@ def inject_before_run(file_path, code_to_inject, framework):
     injected_lines = [""] + code_to_inject.split("\n") + [""]
     new_content = "\n".join(before + injected_lines + after)
 
-    backup = backup_file(file_path)
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(new_content)
 
@@ -94,10 +155,6 @@ def inject_before_run(file_path, code_to_inject, framework):
 # ── Inject code after application = get_wsgi_application() ───────────────────
 
 def inject_after_wsgi(file_path, code_to_inject):
-    """
-    For Django — injects init code AFTER application = get_wsgi_application()
-    Django needs the application object to exist before SDK init.
-    """
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -107,6 +164,31 @@ def inject_after_wsgi(file_path, code_to_inject):
     if "botversion_sdk" in content or "botversion-sdk" in content:
         return {"success": False, "reason": "already_exists"}
 
+    # ── Backup FIRST before any changes ──────────────────────────────────
+    backup = backup_file(file_path)
+
+    # ── Step 1: Strip import lines from code_to_inject ────────────────────
+    inject_lines = code_to_inject.split("\n")
+    import_lines = []
+    non_import_lines = []
+
+    for line in inject_lines:
+        stripped = line.strip()
+        if stripped.startswith("import ") or stripped.startswith("from "):
+            import_lines.append(line)
+        else:
+            non_import_lines.append(line)
+
+    # Inject imports at the top of the file
+    for imp in import_lines:
+        if imp.strip() and imp.strip() not in content:
+            inject_import(file_path, imp.strip())
+
+    # Re-read file after import injection
+    with open(file_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # ── Step 2: Inject the rest after get_wsgi_application() ─────────────
     lines = content.split("\n")
     wsgi_line_index = -1
 
@@ -118,42 +200,17 @@ def inject_after_wsgi(file_path, code_to_inject):
     if wsgi_line_index == -1:
         return {"success": False, "reason": "no_wsgi_call", "suggestion": "append"}
 
-    # Insert AFTER the wsgi line
+    init_block = "\n".join(non_import_lines).strip()
+
     before = lines[:wsgi_line_index + 1]
     after = lines[wsgi_line_index + 1:]
-    injected_lines = [""] + code_to_inject.split("\n") + [""]
+    injected_lines = [""] + init_block.split("\n") + [""]
     new_content = "\n".join(before + injected_lines + after)
 
-    backup = backup_file(file_path)
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(new_content)
 
     return {"success": True, "line_number": wsgi_line_index + 1, "backup": backup}
-
-
-# ── Append code to end of file ────────────────────────────────────────────────
-
-def append_to_file(file_path, code_to_append):
-    """
-    Adds code to end of file.
-    Mirrors JS appendToFile()
-    """
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except Exception as e:
-        return {"success": False, "reason": "read_error", "error": str(e)}
-
-    if "botversion_sdk" in content or "botversion-sdk" in content:
-        return {"success": False, "reason": "already_exists"}
-
-    backup_file(file_path)
-    new_content = content.rstrip() + "\n\n" + code_to_append + "\n"
-
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(new_content)
-
-    return {"success": True}
 
 
 # ── Create a new file ─────────────────────────────────────────────────────────
@@ -176,10 +233,6 @@ def create_file(file_path, content, force=False):
 # ── Add import to top of file ─────────────────────────────────────────────────
 
 def inject_import(file_path, import_line):
-    """
-    Adds an import line to the top of a Python file if not already present.
-    Python-specific — no JS equivalent.
-    """
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -192,14 +245,40 @@ def inject_import(file_path, import_line):
     lines = content.split("\n")
 
     # Find the last import line
-    last_import_index = 0
+    last_import_index = -1  # ← was 0, now -1 meaning "not found"
     for i, line in enumerate(lines):
         if line.startswith("import ") or line.startswith("from "):
             last_import_index = i
 
-    # Insert after last import
-    before = lines[:last_import_index + 1]
-    after = lines[last_import_index + 1:]
+    if last_import_index == -1:
+        insert_index = 0
+        in_docstring = False
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            # Track multiline docstrings
+            if stripped.startswith('"""') or stripped.startswith("'''"):
+                if in_docstring:
+                    in_docstring = False  # closing
+                    insert_index = i + 1
+                    continue
+                elif not stripped.endswith('"""') or len(stripped) == 3:
+                    in_docstring = True  # opening
+                    insert_index = i + 1
+                    continue
+            if in_docstring:
+                insert_index = i + 1
+                continue
+            if stripped.startswith("#") or stripped == "":
+                insert_index = i + 1
+                continue
+            break
+        before = lines[:insert_index]
+        after = lines[insert_index:]
+    else:
+        # Insert after last import
+        before = lines[:last_import_index + 1]
+        after = lines[last_import_index + 1:]
+
     new_content = "\n".join(before + [import_line] + after)
 
     with open(file_path, "w", encoding="utf-8") as f:
@@ -249,11 +328,11 @@ def inject_django_url(urls_path, url_code):
 
     if urlpatterns_end == -1:
         # Fallback: append to end of file
-        backup_file(urls_path)
+        backup = backup_file(urls_path)
         new_content = content.rstrip() + "\n\n" + url_code + "\n"
         with open(urls_path, "w", encoding="utf-8") as f:
             f.write(new_content)
-        return {"success": True, "method": "append"}
+        return {"success": True, "backup": backup, "method": "append"}
 
     # Insert before the closing bracket
     before = lines[:urlpatterns_end]
@@ -293,13 +372,10 @@ def inject_script_tag(file_path, file_type, script_tag, force=False):
 
     # ── HTML file — inject before </body> ─────────────────────────────────────
     if file_type == "html":
-        if "</body>" not in content:
+        pos = content.rfind("</body>")
+        if pos == -1:
             return {"success": False, "reason": "no_body_tag"}
-
-        new_content = content.replace(
-            "</body>",
-            f"  {script_tag}\n</body>"
-        )
+        new_content = content[:pos] + f"  {script_tag}\n" + content[pos:]
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(new_content)
         return {"success": True, "backup": backup}
@@ -370,3 +446,85 @@ def write_summary(changes):
     lines.append("")
 
     return "\n".join(lines)
+
+
+# ── Inject into Django INSTALLED_APPS ─────────────────────────────────────────
+
+def inject_into_installed_apps(settings_path, app_name):
+    """
+    Adds an app to Django's INSTALLED_APPS list.
+    """
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        return {"success": False, "reason": "read_error", "error": str(e)}
+
+    if app_name in content:
+        return {"success": False, "reason": "already_exists"}
+
+    lines = content.split("\n")
+    installed_apps_end = -1
+    in_installed_apps = False
+    bracket_depth = 0
+
+    for i, line in enumerate(lines):
+        if re.search(r"INSTALLED_APPS\s*=\s*\[", line):
+            in_installed_apps = True
+            bracket_depth = 1
+            continue
+        if in_installed_apps:
+            bracket_depth += line.count("[") - line.count("]")
+            if bracket_depth <= 0:
+                installed_apps_end = i
+                break
+
+    if installed_apps_end == -1:
+        return {"success": False, "reason": "no_installed_apps"}
+
+    before = lines[:installed_apps_end]
+    after = lines[installed_apps_end:]
+    new_content = "\n".join(before + [f'    "{app_name}",'] + after)
+
+    backup_file(settings_path)
+    with open(settings_path, "w", encoding="utf-8") as f:
+        f.write(new_content)
+
+    return {"success": True}
+
+
+# ── Inject into Django MIDDLEWARE ─────────────────────────────────────────────
+
+def inject_into_middleware(settings_path, middleware_name):
+    """
+    Adds a middleware to Django's MIDDLEWARE list — at the top.
+    """
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        return {"success": False, "reason": "read_error", "error": str(e)}
+
+    if middleware_name in content:
+        return {"success": False, "reason": "already_exists"}
+
+    lines = content.split("\n")
+    middleware_start = -1
+
+    for i, line in enumerate(lines):
+        if re.search(r"MIDDLEWARE\s*=\s*\[", line):
+            middleware_start = i
+            break
+
+    if middleware_start == -1:
+        return {"success": False, "reason": "no_middleware"}
+
+    before = lines[:middleware_start + 1]
+    after = lines[middleware_start + 1:]
+    new_content = "\n".join(before + [f'    "{middleware_name}",'] + after)
+
+    backup_file(settings_path)
+    with open(settings_path, "w", encoding="utf-8") as f:
+        f.write(new_content)
+
+    return {"success": True}

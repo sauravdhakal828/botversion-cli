@@ -113,7 +113,10 @@ async function main() {
   step("Fetching project info from platform...");
   let projectInfo;
   try {
-    projectInfo = await fetchProjectInfo(args.key, "http://localhost:3000");
+    projectInfo = await fetchProjectInfo(
+      args.key,
+      "https://chatbusiness-two.vercel.app",
+    );
     success(`Project found — ID: ${projectInfo.projectId}`);
   } catch (err) {
     error(err.message);

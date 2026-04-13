@@ -92,7 +92,7 @@ def main():
     try:
         import urllib.request
         import json as _json
-        url = f"http://localhost:3000/api/sdk/project-info?workspaceKey={args.key}"
+        url = f"https://chatbusiness-two.vercel.app/api/sdk/project-info?workspaceKey={args.key}"
         with urllib.request.urlopen(url) as response:
             project_info = _json.loads(response.read().decode())
         success(f"Project found — ID: {project_info.get('projectId')}")
@@ -174,34 +174,51 @@ def main():
         setup_django(detected, args, changes, cwd)
 
     # ── Write API key to .env ─────────────────────────────────────────────────
-    env_path = os.path.join(cwd, ".env")
-    env_line = f"BOTVERSION_API_KEY={args.key}"
+    backend_root = detected.get("backend_root", cwd)
 
-    env_content = ""
-    if os.path.exists(env_path):
-        with open(env_path, "r", encoding="utf-8") as f:
-            env_content = f.read()
+    # Write to both root and backend_root to cover all cases
+    env_paths_to_write = list(dict.fromkeys([
+        os.path.join(backend_root, ".env"),  # backend first
+        os.path.join(cwd, ".env"),           # root second
+    ]))
 
-    if "BOTVERSION_API_KEY" not in env_content:
-        write_env = prompts.confirm("Add BOTVERSION_API_KEY to .env?", default_yes=True)
+    wrote_any = False
+    user_declined = False
 
-        if write_env:
+    for env_path in env_paths_to_write:
+        env_content = ""
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                env_content = f.read()
+
+        if "BOTVERSION_API_KEY" not in env_content:
+            if user_declined:
+                break
+
+            if not wrote_any:
+                # Only ask once
+                write_env = prompts.confirm("Add BOTVERSION_API_KEY to .env?", default_yes=True)
+                if not write_env:
+                    user_declined = True
+                    warn("Skipped — add this manually to your .env:")
+                    log()
+                    log("    # BotVersion API key")
+                    log(f"    BOTVERSION_API_KEY={args.key}")
+                    log()
+                    changes["manual"].append(
+                        f"Add to your .env:\n\n    # BotVersion API key\n    BOTVERSION_API_KEY={args.key}"
+                    )
+                    break
+
             env_addition = generator.generate_env_line(args.key)
+            writer.backup_file(env_path)
             with open(env_path, "w", encoding="utf-8") as f:
                 f.write(env_content.rstrip() + env_addition)
-            success("Added BOTVERSION_API_KEY to .env")
-            changes["modified"].append(".env")
+            success(f"Added BOTVERSION_API_KEY to {os.path.relpath(env_path, cwd)}")
+            changes["modified"].append(os.path.relpath(env_path, cwd))
+            wrote_any = True
         else:
-            warn("Skipped — add this manually to your .env:")
-            log()
-            log("    # BotVersion API key")
-            log(f"    BOTVERSION_API_KEY={args.key}")
-            log()
-            changes["manual"].append(
-                f"Add to your .env:\n\n    # BotVersion API key\n    BOTVERSION_API_KEY={args.key}"
-            )
-    else:
-        info("BOTVERSION_API_KEY already exists in .env — skipping.")
+            info(f"BOTVERSION_API_KEY already exists in {os.path.relpath(env_path, cwd)} — skipping.")
 
     # ── Print summary ─────────────────────────────────────────────────────────
     log(writer.write_summary(changes))
@@ -211,33 +228,43 @@ def main():
 
 def setup_fastapi(detected, args, changes, cwd):
     step("Setting up FastAPI...")
+    backend_root = detected.get("backend_root", cwd)
 
     entry_point = detected.get("entry_point")
 
     if not entry_point or not os.path.exists(entry_point):
-        warn("Could not find your server entry point automatically.")
         manual_path = prompts.prompt_entry_point()
-        entry_point = os.path.join(cwd, manual_path)
 
-        if not os.path.exists(entry_point):
-            error(f"File not found: {entry_point}")
+        candidates = [
+            os.path.join(cwd, manual_path),
+            os.path.join(backend_root, manual_path),
+        ]
+        candidates = list(dict.fromkeys(candidates))
+
+        entry_point = None
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                entry_point = candidate
+                break
+
+        if not entry_point:
+            error(f"File not found: {manual_path}")
+            error(f"Looked in:")
+            for c in candidates:
+                error(f"  {c}")
             sys.exit(1)
 
     success(f"Entry point: {os.path.relpath(entry_point, cwd)}")
 
     generated = generator.generate_fastapi_init(detected, args.key)
 
-    # Inject imports first
-    if generated.get("imports"):
-        for imp in generated["imports"].split("\n"):
-            if imp.strip() and "botversion_sdk" not in imp:
-                writer.inject_import(entry_point, imp)
-
     # Inject init block before uvicorn.run()
+    # inject_before_run() handles imports internally
+    full_code = generated.get("imports", "") + "\n\n" + generated["init_block"]
     run_call = detected.get("run_call")
 
     if run_call:
-        result = writer.inject_before_run(entry_point, generated["init_block"], "fastapi")
+        result = writer.inject_before_run(entry_point, full_code, "fastapi")
 
         if result["success"]:
             success(f"Injected botversion_sdk.init() before uvicorn.run()")
@@ -247,10 +274,17 @@ def setup_fastapi(detected, args, changes, cwd):
         elif result["reason"] == "already_exists":
             warn("BotVersion already found — skipping injection.")
         else:
-            _handle_missing_run_call(entry_point, generated["init_block"], "fastapi", changes, cwd, detected)
+            _handle_missing_run_call(entry_point, generated["init_block"], generated.get("imports", ""), "fastapi", changes, cwd, detected)
 
     else:
-        _handle_missing_run_call(entry_point, generated["init_block"], "fastapi", changes, cwd, detected)
+        # No uvicorn.run() found — common in Docker/CLI projects, just append
+        full_block = (generated.get("imports", "") + "\n\n" + generated["init_block"])
+        result = writer.append_to_file(entry_point, full_block)
+        if result["success"]:
+            success("Injected botversion_sdk.init() into main.py")
+            changes["modified"].append(os.path.relpath(entry_point, cwd))
+        elif result["reason"] == "already_exists":
+            warn("BotVersion already found — skipping injection.")
 
     # ── Inject script tag into frontend file ──────────────────────────────────
     _inject_frontend_script_tag(detected, changes, cwd, args.force)
@@ -262,31 +296,42 @@ def setup_flask(detected, args, changes, cwd):
     step("Setting up Flask...")
 
     entry_point = detected.get("entry_point")
+    backend_root = detected.get("backend_root", cwd)
 
     if not entry_point or not os.path.exists(entry_point):
         warn("Could not find your server entry point automatically.")
         manual_path = prompts.prompt_entry_point()
-        entry_point = os.path.join(cwd, manual_path)
 
-        if not os.path.exists(entry_point):
-            error(f"File not found: {entry_point}")
+        candidates = [
+            os.path.join(cwd, manual_path),
+            os.path.join(backend_root, manual_path),
+        ]
+        candidates = list(dict.fromkeys(candidates))
+
+        entry_point = None
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                entry_point = candidate
+                break
+
+        if not entry_point:
+            error(f"File not found: {manual_path}")
+            error(f"Looked in:")
+            for c in candidates:
+                error(f"  {c}")
             sys.exit(1)
 
     success(f"Entry point: {os.path.relpath(entry_point, cwd)}")
 
     generated = generator.generate_flask_init(detected, args.key)
 
-    # Inject imports
-    if generated.get("imports"):
-        for imp in generated["imports"].split("\n"):
-            if imp.strip() and "botversion_sdk" not in imp:
-                writer.inject_import(entry_point, imp)
-
     # Inject init block before app.run()
+    # inject_before_run() handles imports internally
+    full_code = generated.get("imports", "") + "\n\n" + generated["init_block"]
     run_call = detected.get("run_call")
 
     if run_call:
-        result = writer.inject_before_run(entry_point, generated["init_block"], "flask")
+        result = writer.inject_before_run(entry_point, full_code, "flask")
 
         if result["success"]:
             success("Injected botversion_sdk.init() before app.run()")
@@ -296,10 +341,16 @@ def setup_flask(detected, args, changes, cwd):
         elif result["reason"] == "already_exists":
             warn("BotVersion already found — skipping injection.")
         else:
-            _handle_missing_run_call(entry_point, generated["init_block"], "flask", changes, cwd, detected)
+            _handle_missing_run_call(entry_point, generated["init_block"], generated.get("imports", ""), "flask", changes, cwd, detected)
 
     else:
-        _handle_missing_run_call(entry_point, generated["init_block"], "flask", changes, cwd, detected)
+        full_block = (generated.get("imports", "") + "\n\n" + generated["init_block"])
+        result = writer.append_to_file(entry_point, full_block)
+        if result["success"]:
+            success("Injected botversion_sdk.init() into app.py")
+            changes["modified"].append(os.path.relpath(entry_point, cwd))
+        elif result["reason"] == "already_exists":
+            warn("BotVersion already found — skipping injection.")
 
     # ── Inject script tag into frontend file ──────────────────────────────────
     _inject_frontend_script_tag(detected, changes, cwd, args.force)
@@ -310,16 +361,32 @@ def setup_flask(detected, args, changes, cwd):
 def setup_django(detected, args, changes, cwd):
     step("Setting up Django...")
 
+    backend_root = detected.get("backend_root", cwd)
+
     # 1. Find wsgi.py or asgi.py
     wsgi_path = detected.get("entry_point")
 
     if not wsgi_path or not os.path.exists(wsgi_path):
         warn("Could not find wsgi.py or asgi.py automatically.")
         manual_path = prompts.prompt_entry_point()
-        wsgi_path = os.path.join(cwd, manual_path)
 
-        if not os.path.exists(wsgi_path):
-            error(f"File not found: {wsgi_path}")
+        candidates = [
+            os.path.join(cwd, manual_path),
+            os.path.join(backend_root, manual_path),
+        ]
+        candidates = list(dict.fromkeys(candidates))
+
+        wsgi_path = None
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                wsgi_path = candidate
+                break
+
+        if not wsgi_path:
+            error(f"File not found: {manual_path}")
+            error(f"Looked in:")
+            for c in candidates:
+                error(f"  {c}")
             sys.exit(1)
 
     success(f"Entry point: {os.path.relpath(wsgi_path, cwd)}")
@@ -342,7 +409,11 @@ def setup_django(detected, args, changes, cwd):
             success("Appended botversion_sdk.init() to wsgi.py")
             changes["modified"].append(os.path.relpath(wsgi_path, cwd))
 
-    # 3. Find and update urls.py
+    # 3. Inject CORS settings into settings.py
+    step("Configuring CORS...")
+    _inject_cors_settings(detected, changes, cwd)
+
+    # 4. Find and update urls.py
     step("Adding chat URL to urls.py...")
 
     urls_candidates = [
@@ -351,21 +422,24 @@ def setup_django(detected, args, changes, cwd):
         "core/urls.py",
         "app/urls.py",
         "src/urls.py",
+        "backend/urls.py",
     ]
 
-    # Also search for the main urls.py
     urls_path = None
     for candidate in urls_candidates:
-        full_path = os.path.join(cwd, candidate)
-        if os.path.exists(full_path):
-            try:
-                with open(full_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                if "urlpatterns" in content:
-                    urls_path = full_path
-                    break
-            except Exception:
-                continue
+        for base in list(dict.fromkeys([cwd, backend_root])):
+            full_path = os.path.join(base, candidate)
+            if os.path.exists(full_path):
+                try:
+                    with open(full_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    if "urlpatterns" in content:
+                        urls_path = full_path
+                        break
+                except Exception:
+                    continue
+        if urls_path:
+            break
 
     if not urls_path:
         urls_path = detector.find_file_with_content(cwd, "urlpatterns", [".py"], max_depth=3)
@@ -373,7 +447,12 @@ def setup_django(detected, args, changes, cwd):
     if not urls_path:
         warn("Could not find your main urls.py automatically.")
         manual_path = prompts.prompt_django_urls_path()
-        urls_path = os.path.join(cwd, manual_path)
+        candidates = [
+            os.path.join(cwd, manual_path),
+            os.path.join(backend_root, manual_path),
+        ]
+        candidates = list(dict.fromkeys(candidates))
+        urls_path = next((c for c in candidates if os.path.exists(c)), candidates[0])
 
     if urls_path and os.path.exists(urls_path):
         url_code = generator.generate_django_chat_url()
@@ -396,7 +475,76 @@ def setup_django(detected, args, changes, cwd):
         )
 
     # ── Inject script tag into frontend file ──────────────────────────────────
-    inject_frontend_script_tag(detected, changes, cwd, args.force)
+    _inject_frontend_script_tag(detected, changes, cwd, args.force)
+
+
+# ── Inject CORS settings into Django settings.py ─────────────────────────────
+
+def _inject_cors_settings(detected, changes, cwd):
+    """
+    Automatically configures django-cors-headers in settings.py.
+    So users don't need to manually set up CORS.
+    """
+    settings_info = detected.get("django_settings")
+    if not settings_info:
+        warn("Could not find settings.py — skipping CORS setup.")
+        changes["manual"].append(
+            "Add CORS configuration to your settings.py manually:\n\n"
+            "    pip install django-cors-headers\n\n"
+            "    INSTALLED_APPS += ['corsheaders']\n\n"
+            "    MIDDLEWARE = ['corsheaders.middleware.CorsMiddleware'] + MIDDLEWARE\n\n"
+            "    CORS_ALLOW_ALL_ORIGINS = True"
+        )
+        return
+
+    settings_path = settings_info.get("path")
+
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception:
+        warn("Could not read settings.py — skipping CORS setup.")
+        return
+
+    # Already configured
+    if "corsheaders" in content:
+        info("CORS already configured in settings.py — skipping.")
+        return
+
+    backup = writer.backup_file(settings_path)
+    if backup:
+        changes["backups"].append(backup)
+
+    # Step 1: Add corsheaders to INSTALLED_APPS
+    result1 = writer.inject_into_installed_apps(settings_path, "corsheaders")
+
+    # Step 2: Add CorsMiddleware to top of MIDDLEWARE
+    result2 = writer.inject_into_middleware(
+        settings_path,
+        "corsheaders.middleware.CorsMiddleware"
+    )
+
+    # Step 3: Append CORS_ALLOW_ALL_ORIGINS to end of settings.py
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            current_content = f.read()
+        if "CORS_ALLOW_ALL_ORIGINS" not in current_content:
+            with open(settings_path, "a", encoding="utf-8") as f:
+                f.write("\n# BotVersion — allow all origins for AI agent widget\nCORS_ALLOW_ALL_ORIGINS = True\n")
+    except Exception:
+        pass
+
+    if result1.get("success") or result2.get("success"):
+        success("Added CORS configuration to settings.py")
+        changes["modified"].append(os.path.relpath(settings_path, cwd))
+    else:
+        warn("Could not auto-configure CORS — add manually:")
+        changes["manual"].append(
+            "Add to your settings.py:\n\n"
+            "    INSTALLED_APPS += ['corsheaders']\n\n"
+            "    MIDDLEWARE = ['corsheaders.middleware.CorsMiddleware'] + MIDDLEWARE\n\n"
+            "    CORS_ALLOW_ALL_ORIGINS = True"
+        )
 
 
 # ── Inject frontend script tag ────────────────────────────────────────────────
@@ -448,11 +596,7 @@ def _inject_frontend_script_tag(detected, changes, cwd, force):
 
 # ── Handle missing run call ───────────────────────────────────────────────────
 
-def _handle_missing_run_call(entry_point, init_block, framework, changes, cwd, detected):
-    """
-    Handles the case where app.run() / uvicorn.run() can't be found.
-    Mirrors JS last-resort block in setupExpress()
-    """
+def _handle_missing_run_call(entry_point, init_block, imports, framework, changes, cwd, detected):
     warn("Could not find the right place to inject automatically.")
     response = prompts.prompt_missing_run_call(
         os.path.relpath(entry_point, cwd),
@@ -460,23 +604,34 @@ def _handle_missing_run_call(entry_point, init_block, framework, changes, cwd, d
     )
 
     if response["action"] == "append":
-        result = writer.append_to_file(entry_point, init_block)
+        full_block = (imports + "\n\n" + init_block) if imports else init_block
+        result = writer.append_to_file(entry_point, full_block)
         if result["success"]:
             success("Appended BotVersion setup to end of file.")
             changes["modified"].append(os.path.relpath(entry_point, cwd))
 
     elif response["action"] == "manual_path":
-        alt_path = os.path.join(cwd, response["file_path"])
-        if os.path.exists(alt_path):
-            result = writer.inject_before_run(alt_path, init_block, framework)
+        backend_root = detected.get("backend_root", cwd)
+        candidates = [
+            os.path.join(cwd, response["file_path"]),
+            os.path.join(backend_root, response["file_path"]),
+        ]
+        candidates = list(dict.fromkeys(candidates))
+
+        alt_path = next((c for c in candidates if os.path.exists(c)), None)
+
+        if alt_path:
+            full_block = (imports + "\n\n" + init_block) if imports else init_block
+            result = writer.inject_before_run(alt_path, full_block, framework)
             if result["success"]:
                 success(f"Injected into {response['file_path']}")
                 changes["modified"].append(response["file_path"])
         else:
-            error(f"File not found: {alt_path}")
+            error(f"File not found: {response['file_path']}")
             changes["manual"].append(
                 f"Add this to your server file:\n{init_block}"
             )
+
     else:
         changes["manual"].append(
             f"Add this to your server file before starting the server:\n\n{init_block}"
