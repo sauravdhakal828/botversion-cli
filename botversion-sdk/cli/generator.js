@@ -19,12 +19,16 @@ function generateExpressInit(info, apiKey) {
 
   const getUserContext = generateExpressUserContext(auth);
 
+  const apiKeyValue = info.hasDotenv
+    ? `process.env.BOTVERSION_API_KEY`
+    : `process.env.BOTVERSION_API_KEY || '${apiKey}'`;
+
   const initBlock = `
 // BotVersion AI Agent — auto-added by botversion-sdk init
 ${importLine}
 
 BotVersion.init(${appVarName}, {
-  apiKey: process.env.BOTVERSION_API_KEY,
+  apiKey: ${apiKeyValue},
 });
 
 ${appVarName}.post('/api/botversion/chat', (req, res) => {
@@ -53,11 +57,7 @@ function generateExpressUserContext(auth) {
     case "passport":
       return {
         option: `
-  getUserContext: (req) => ({
-    userId: req.user?.id,
-    email: req.user?.email,
-    role: req.user?.role,
-  }),`,
+  getUserContext: (req) => req.user || {},`,
         helperCode: null,
         imports: null,
       };
@@ -65,14 +65,17 @@ function generateExpressUserContext(auth) {
     case "jwt":
       return {
         option: `
-  getUserContext: (req) => {
-    // Decoded by your JWT middleware — adjust fields as needed
-    return {
-      userId: req.user?.id || req.user?.sub,
-      email: req.user?.email,
-      role: req.user?.role,
-    };
-  },`,
+getUserContext: (req) => {
+  try {
+    const authHeader = req.headers['authorization'] || '';
+    const token = authHeader.replace('Bearer ', '');
+    if (!token) return {};
+    const decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET);
+    return decoded;
+  } catch (e) {
+    return {};
+  }
+},`,
         helperCode: null,
         imports: null,
       };
@@ -80,11 +83,7 @@ function generateExpressUserContext(auth) {
     case "express-session":
       return {
         option: `
-  getUserContext: (req) => ({
-    userId: req.session?.user?.id,
-    email: req.session?.user?.email,
-    role: req.session?.user?.role,
-  }),`,
+  getUserContext: (req) => req.session?.user || {},`,
         helperCode: null,
         imports: null,
       };
@@ -223,9 +222,9 @@ import { getAuth } from '${pkg}/server';
 export default BotVersion.nextHandler({
   apiKey: process.env.BOTVERSION_API_KEY,
   getSession: async (req, res) => {
-    const { userId } = getAuth(req);
-    return { user: { id: userId } };
-  },
+  const user = getAuth(req);
+  return { user: user || {} };
+},
 });
 `;
 }
@@ -237,10 +236,10 @@ import { createServerSupabaseClient } from '@supabase/auth-helpers-nextjs';
 export default BotVersion.nextHandler({
   apiKey: process.env.BOTVERSION_API_KEY,
   getSession: async (req, res) => {
-    const supabase = createServerSupabaseClient({ req, res });
-    const { data: { session } } = await supabase.auth.getSession();
-    return { user: session?.user ?? null };
-  },
+  const supabase = createServerSupabaseClient({ req, res });
+  const { data: { session } } = await supabase.auth.getSession();
+  return { user: session?.user || {} };
+},
 });
 `;
 }
@@ -359,14 +358,10 @@ export async function POST(req${typeAnnotation}) {
     const session = await getServerSession(authOptions);
     const body = await req.json();
 
-    const userContext = {
-      userId: session?.user?.id,
-      email: session?.user?.email,
-      name: session?.user?.name,
-    };
+    const userContext = session?.user || {};
 
     // Forward to BotVersion platform directly
-    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'https://chatbusiness-two.vercel.app'}/api/chatbot/widget-chat\`, {
+    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'http://localhost:3000'}/api/chatbot/widget-chat\`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -396,16 +391,14 @@ function generateClerkAppRoute(info) {
     ? `import { NextRequest, NextResponse } from 'next/server';\n`
     : `import { NextResponse } from 'next/server';\n`;
 
-  return `import BotVersion from 'botversion-sdk';
-import { auth } from '@clerk/nextjs/server';
+  return `import { auth } from '@clerk/nextjs/server';
 ${nextRequestImport}
 export async function POST(req${typeAnnotation}) {
   try {
-    // FIX #6: auth() is async in Clerk v5+ — must be awaited
-    const { userId } = await auth();
+    const user = await auth();
     const body = await req.json();
 
-    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'https://chatbusiness-two.vercel.app'}/api/chatbot/widget-chat\`, {
+    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'http://localhost:3000'}/api/chatbot/widget-chat\`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -414,7 +407,7 @@ export async function POST(req${typeAnnotation}) {
         query: body.message,
         previousChats: body.conversationHistory || [],
         pageContext: body.pageContext || {},
-        userContext: { userId },
+        userContext: user || {},
       }),
     });
 
@@ -444,7 +437,7 @@ export async function POST(req${typeAnnotation}) {
     const { data: { session } } = await supabase.auth.getSession();
     const body = await req.json();
 
-    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'https://chatbusiness-two.vercel.app'}/api/chatbot/widget-chat\`, {
+    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'http://localhost:3000'}/api/chatbot/widget-chat\`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -453,10 +446,7 @@ export async function POST(req${typeAnnotation}) {
         query: body.message,
         previousChats: body.conversationHistory || [],
         pageContext: body.pageContext || {},
-        userContext: {
-          userId: session?.user?.id,
-          email: session?.user?.email,
-        },
+        userContext: session?.user || {},
       }),
     });
 
@@ -491,7 +481,7 @@ export async function POST(req${typeAnnotation}) {
     // Add userContext here if needed:
     // const userContext = { userId: '...', email: '...' };
 
-    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'https://chatbusiness-two.vercel.app'}/api/chatbot/widget-chat\`, {
+    const response = await fetch(\`\${process.env.BOTVERSION_PLATFORM_URL || 'http://localhost:3000'}/api/chatbot/widget-chat\`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

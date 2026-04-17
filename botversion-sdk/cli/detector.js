@@ -777,6 +777,29 @@ function detectAppVarName(filePath) {
   }
 }
 
+function detectDotenv(cwd, pkg, entryPoint) {
+  // Check if dotenv is in dependencies
+  const deps = {
+    ...(pkg.dependencies || {}),
+    ...(pkg.devDependencies || {}),
+  };
+  const hasDotenvPackage = !!deps["dotenv"];
+
+  // Check if dotenv is actually being called in entry file
+  let hasDotenvCall = false;
+  if (entryPoint && fs.existsSync(entryPoint)) {
+    try {
+      const content = fs.readFileSync(entryPoint, "utf8");
+      hasDotenvCall =
+        content.includes("dotenv") ||
+        content.includes("require('dotenv')") ||
+        content.includes('require("dotenv")');
+    } catch {}
+  }
+
+  return hasDotenvPackage || hasDotenvCall;
+}
+
 // ─── MAIN DETECT FUNCTION ────────────────────────────────────────────────────
 
 function detect(cwd) {
@@ -892,6 +915,7 @@ function detect(cwd) {
 
   if (framework.name === "express") {
     result.entryPoint = detectExpressEntry(backendDir, backendPkg);
+    result.hasDotenv = detectDotenv(backendDir, backendPkg, result.entryPoint);
     if (result.entryPoint) {
       result.appVarName = detectAppVarName(result.entryPoint); // detect FIRST
       result.listenCall = findListenCall(result.entryPoint, result.appVarName);
@@ -959,4 +983,5 @@ module.exports = {
   findListenInsideCallback,
   findCreateServer,
   detectAppVarName,
+  detectDotenv,
 };

@@ -113,10 +113,7 @@ async function main() {
   step("Fetching project info from platform...");
   let projectInfo;
   try {
-    projectInfo = await fetchProjectInfo(
-      args.key,
-      "https://chatbusiness-two.vercel.app",
-    );
+    projectInfo = await fetchProjectInfo(args.key, "http://localhost:3000");
     success(`Project found — ID: ${projectInfo.projectId}`);
   } catch (err) {
     error(err.message);
@@ -306,6 +303,52 @@ async function setupExpress(detected, args, changes, projectInfo) {
   }
 
   success(`Entry point: ${path.relative(detected.cwd, entryPoint)}`);
+
+  if (!detected.hasDotenv) {
+    warn("dotenv not detected — installing it automatically...");
+
+    const { execSync } = require("child_process");
+    const installCmd =
+      detected.packageManager === "yarn"
+        ? "yarn add dotenv"
+        : detected.packageManager === "pnpm"
+          ? "pnpm add dotenv"
+          : detected.packageManager === "bun"
+            ? "bun add dotenv"
+            : "npm install dotenv";
+
+    try {
+      execSync(installCmd, {
+        cwd: detected.cwd,
+        stdio: "inherit",
+      });
+      success("dotenv installed successfully");
+
+      // Inject require('dotenv').config() at top of entry file
+      const isESM = detected.moduleSystem === "esm";
+      const dotenvLine = isESM
+        ? `import 'dotenv/config';`
+        : `require('dotenv').config();`;
+
+      const injectResult = writer.injectAtTop(entryPoint, dotenvLine);
+      if (injectResult.success) {
+        success("Added dotenv config to entry file");
+        changes.modified.push(path.relative(detected.cwd, entryPoint));
+        if (injectResult.backup) changes.backups.push(injectResult.backup);
+      }
+
+      // Mark as having dotenv now so generator uses process.env
+      detected.hasDotenv = true;
+    } catch (err) {
+      warn("Could not install dotenv automatically.");
+      warn(`Please run manually: ${installCmd}`);
+      warn("And add to top of your entry file: require('dotenv').config();");
+      changes.manual.push(
+        `Install dotenv: ${installCmd}\n` +
+          `Add to top of ${path.relative(detected.cwd, entryPoint)}: require('dotenv').config();`,
+      );
+    }
+  }
 
   // Generate the init code
   const generated = generator.generateExpressInit(detected, args.key);

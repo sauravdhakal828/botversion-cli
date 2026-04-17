@@ -30,6 +30,11 @@ function injectBeforeListen(filePath, codeToInject, appVarName) {
   const lines = content.split("\n");
   const listenRegex = new RegExp(`${appVarName}\\.listen\\s*\\(`);
 
+  // Check if BotVersion already exists in file
+  if (content.includes("botversion-sdk") || content.includes("BotVersion")) {
+    return { success: false, reason: "already_exists" };
+  }
+
   let listenLineIndex = -1;
   for (let i = 0; i < lines.length; i++) {
     if (listenRegex.test(lines[i])) {
@@ -39,7 +44,6 @@ function injectBeforeListen(filePath, codeToInject, appVarName) {
   }
 
   if (listenLineIndex === -1) {
-    // app.listen not found — append to end of file
     return {
       success: false,
       reason: "no_listen",
@@ -47,22 +51,64 @@ function injectBeforeListen(filePath, codeToInject, appVarName) {
     };
   }
 
-  // Check if BotVersion already exists in file
-  if (content.includes("botversion-sdk") || content.includes("BotVersion")) {
-    return { success: false, reason: "already_exists" };
+  // ── NEW: Check if app.listen() is inside if (require.main === module) ──
+  // If so, inject before that if block instead of inside it
+  let insertIndex = listenLineIndex;
+
+  for (let i = listenLineIndex; i >= 0; i--) {
+    const trimmed = lines[i].trim();
+
+    // Found if (require.main === module) block
+    if (
+      /if\s*\(\s*require\.main\s*===?\s*module\s*\)/.test(trimmed) ||
+      /if\s*\(\s*module\s*===?\s*require\.main\s*\)/.test(trimmed)
+    ) {
+      insertIndex = i;
+      // Keep walking back to check for 404/error handlers before this
+      continue;
+    }
+
+    // Found a 404 handler — inject before this instead
+    if (
+      /app\.use\s*\(\s*\(req,\s*res\)\s*=>/.test(trimmed) ||
+      /app\.use\s*\(\s*function\s*\(req,\s*res\)/.test(trimmed)
+    ) {
+      insertIndex = i;
+      continue;
+    }
+
+    // Found a global error handler — inject before this instead
+    if (
+      /app\.use\s*\(\s*\(err,\s*req,\s*res,\s*next\)/.test(trimmed) ||
+      /app\.use\s*\(\s*function\s*\(err,\s*req,\s*res,\s*next\)/.test(trimmed)
+    ) {
+      insertIndex = i;
+      continue;
+    }
+
+    // Stop walking back if we hit a top-level non-empty statement
+    if (
+      i < listenLineIndex &&
+      trimmed !== "" &&
+      trimmed !== "}" &&
+      trimmed !== "})" &&
+      trimmed !== "});" &&
+      lines[i].match(/^[^\s]/)
+    ) {
+      break;
+    }
   }
 
-  // Insert the code block before app.listen()
-  const before = lines.slice(0, listenLineIndex);
-  const after = lines.slice(listenLineIndex);
-
+  // Insert the code block at the correct position
+  const before = lines.slice(0, insertIndex);
+  const after = lines.slice(insertIndex);
   const injectedLines = ["", ...codeToInject.split("\n"), ""];
-
   const newContent = [...before, ...injectedLines, ...after].join("\n");
+
   const backup = backupFile(filePath);
   fs.writeFileSync(filePath, newContent, "utf8");
 
-  return { success: true, lineNumber: listenLineIndex + 1, backup };
+  return { success: true, lineNumber: insertIndex + 1, backup };
 }
 
 // ─── APPEND CODE TO END OF FILE ──────────────────────────────────────────────
@@ -212,25 +258,25 @@ function writeSummary(changes) {
 
   if (changes.modified && changes.modified.length > 0) {
     lines.push("  Modified files:");
-    changes.modified.forEach((f) => lines.push(`    ✏️  ${f}`));
+    changes.modified.forEach((f) => lines.push(`    [Modified]  ${f}`));
     lines.push("");
   }
 
   if (changes.created && changes.created.length > 0) {
     lines.push("  Created files:");
-    changes.created.forEach((f) => lines.push(`    ✅  ${f}`));
+    changes.created.forEach((f) => lines.push(`    [Created]   ${f}`));
     lines.push("");
   }
 
   if (changes.backups && changes.backups.length > 0) {
     lines.push("  Backups created:");
-    changes.backups.forEach((f) => lines.push(`    💾  ${f}`));
+    changes.backups.forEach((f) => lines.push(`    [Backup]    ${f}`));
     lines.push("");
   }
 
   if (changes.manual && changes.manual.length > 0) {
-    lines.push("  ⚠️  Manual steps needed:");
-    changes.manual.forEach((m) => lines.push(`    → ${m}`));
+    lines.push("  Manual steps needed:");
+    changes.manual.forEach((m) => lines.push(`    [Manual]    ${m}`));
     lines.push("");
   }
 
@@ -415,6 +461,19 @@ function injectIntoNextLayout(filePath, content, scriptTag, backup) {
   return { success: true, backup };
 }
 
+function injectAtTop(filePath, codeToInject) {
+  const content = fs.readFileSync(filePath, "utf8");
+
+  if (content.includes("dotenv")) {
+    return { success: false, reason: "already_exists" };
+  }
+
+  const newContent = codeToInject + "\n" + content;
+  backupFile(filePath);
+  fs.writeFileSync(filePath, newContent, "utf8");
+  return { success: true };
+}
+
 // ─── HELPER: extract attribute value from script tag string ──────────────────
 
 function extractAttr(scriptTag, attr) {
@@ -432,4 +491,5 @@ module.exports = {
   writeSummary,
   injectBeforeExport,
   injectScriptTag,
+  injectAtTop,
 };
