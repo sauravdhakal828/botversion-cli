@@ -1,0 +1,31 @@
+Metadata-Version: 2.4
+Name: botversion-sdk
+Version: 1.0.2
+Summary: BotVersion SDK — automatically discover and register your API endpoints
+Home-page: https://github.com/botversion/botversion-sdk-python
+Author: BotVersion
+Author-email: support@botversion.com
+Keywords: botversion,api,sdk,fastapi,flask,django
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Intended Audience :: Developers
+Classifier: Topic :: Software Development :: Libraries
+Requires-Python: >=3.7
+Description-Content-Type: text/markdown
+Provides-Extra: fastapi
+Requires-Dist: fastapi; extra == "fastapi"
+Requires-Dist: starlette; extra == "fastapi"
+Provides-Extra: flask
+Requires-Dist: flask; extra == "flask"
+Provides-Extra: django
+Requires-Dist: django; extra == "django"
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: provides-extra
+Dynamic: requires-python
+Dynamic: summary

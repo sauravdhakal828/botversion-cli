@@ -1,4 +1,5 @@
 pyproject.toml
+setup.py
 botversion_sdk/__init__.py
 botversion_sdk/client.py
 botversion_sdk/interceptor.py
