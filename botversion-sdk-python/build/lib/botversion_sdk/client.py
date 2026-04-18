@@ -194,10 +194,13 @@ class BotVersionClient:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as res:
                 response_data = res.read().decode("utf-8")
+                print(f"[BotVersion DEBUG] _post {path} raw response: {response_data[:500]}")  # ← ADD
                 parsed = json.loads(response_data)
+                print(f"[BotVersion DEBUG] _post {path} parsed keys: {list(parsed.keys())}")   # ← ADD
                 return parsed
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8")
+            print(f"[BotVersion DEBUG] HTTPError {e.code} from {path}: {error_body[:300]}")
             try:
                 parsed_error = json.loads(error_body)
                 raise RuntimeError(
@@ -208,6 +211,7 @@ class BotVersionClient:
         except urllib.error.URLError as e:
             raise RuntimeError(f"Request failed: {e.reason}")
         except Exception as e:
+            print(f"[BotVersion DEBUG] Exception in _post {path}: {type(e).__name__}: {e}")    # ← ADD
             raise RuntimeError(f"HTTP error: {e}")
 
     def _get(self, path):
@@ -254,3 +258,60 @@ class BotVersionClient:
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._get, path)
+    
+
+
+    # ── Make a call to the user's own API ────────────────────────────────────
+
+    def make_user_api_call(self, method, url, body=None, headers=None):
+        """
+        Makes an HTTP call to the user's own app endpoints.
+        Forwards the original browser auth headers so the user is authenticated.
+        """
+        import urllib.request
+        import json
+
+        body_bytes = json.dumps(body).encode("utf-8") if body else None
+
+        all_headers = {
+            "Content-Type": "application/json",
+        }
+        if headers:
+            all_headers.update(headers)
+
+        req = urllib.request.Request(
+            url,
+            data=body_bytes,
+            method=method.upper(),
+            headers=all_headers,
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as res:
+                response_data = res.read().decode("utf-8")
+                print(f"[BotVersion SDK] make_user_api_call {method} {url} → {res.status}")
+                try:
+                    return {"status": res.status, "data": json.loads(response_data)}
+                except Exception:
+                    return {"status": res.status, "data": response_data}
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8")
+            print(f"[BotVersion SDK] make_user_api_call HTTP error {e.code}: {error_body[:200]}")
+            try:
+                return {"status": e.code, "data": json.loads(error_body)}
+            except Exception:
+                return {"status": e.code, "data": error_body}
+        except Exception as e:
+            print(f"[BotVersion SDK] make_user_api_call failed: {e}")
+            return {"status": 500, "data": str(e)}
+
+    async def make_user_api_call_async(self, method, url, body=None, headers=None):
+        """
+        Async version of make_user_api_call for FastAPI.
+        """
+        import asyncio
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self.make_user_api_call(method, url, body, headers)
+        )

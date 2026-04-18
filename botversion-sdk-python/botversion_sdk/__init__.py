@@ -98,7 +98,7 @@ def init(app=None, api_key=None, **options):
         "api_key": api_key,
         "platform_url": options.get("platform_url", "http://localhost:3000"),
         "debug": debug,
-        "timeout": options.get("timeout", 5),
+        "timeout": options.get("timeout", 30),
         "flush_delay": options.get("flush_delay", 3),
     })
 
@@ -253,6 +253,15 @@ async def _handle_chat_fastapi(request):
     except Exception:
         data = {}
 
+    # Extract auth headers from the original browser request
+    original_headers = {}
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    cookie = request.headers.get("cookie") or request.headers.get("Cookie")
+    if auth:
+        original_headers["Authorization"] = auth
+    if cookie:
+        original_headers["Cookie"] = cookie
+
     print(f"[DEBUG-1] raw userContext from body: {data.get('userContext')}")
     print(f"[DEBUG-2] type: {type(data.get('userContext'))}")
     print(f"[DEBUG-3] bool: {bool(data.get('userContext'))}")
@@ -283,8 +292,15 @@ async def _handle_chat_fastapi(request):
             "chatbot_id": data.get("chatbotId"),
             "public_key": data.get("publicKey"),
         })
+
+        print(f"[DEBUG-RESPONSE] action: {response.get('action')}")
+        print(f"[DEBUG-RESPONSE] keys: {list(response.keys())}")
+        print(f"[DEBUG-RESPONSE] full response: {response}")
+
         return JSONResponse(response, status_code=200)
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"[BotVersion SDK] chat error: {e}")
         return JSONResponse({"error": "Agent error"}, status_code=500)
 
@@ -318,6 +334,15 @@ def _handle_chat_flask(request):
 
     print(f"[BotVersion] userContext being sent: {user_context}")
 
+    # Extract auth headers from the original browser request
+    original_headers = {}
+    auth = request.headers.get("Authorization")
+    cookie = request.headers.get("Cookie")
+    if auth:
+        original_headers["Authorization"] = auth
+    if cookie:
+        original_headers["Cookie"] = cookie
+
     try:
         response = _client.agent_chat({
             "message": data.get("message", ""),
@@ -327,8 +352,11 @@ def _handle_chat_flask(request):
             "chatbot_id": data.get("chatbotId"),
             "public_key": data.get("publicKey"),
         })
+
         return jsonify(response), 200
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"[BotVersion SDK] chat error: {e}")
         return jsonify({"error": "Agent error"}), 500
 
