@@ -11,7 +11,6 @@ const url = require("url");
  */
 function BotVersionClient(options) {
   this.apiKey = options.apiKey;
-  this.chatbotId = options.chatbotId;
   this.platformUrl = options.platformUrl || "http://localhost:3000";
   this.debug = options.debug || false;
   this.timeout = options.timeout || 30000;
@@ -19,7 +18,7 @@ function BotVersionClient(options) {
   // Batch queue for endpoint registration
   this._queue = [];
   this._flushTimer = null;
-  this._flushDelay = options.flushDelay || 3000; // batch every 3 seconds
+  this._flushDelay = options.flushDelay || 3000;
   var self = this;
   process.on("beforeExit", function () {
     if (self._queue.length > 0) self._flush();
@@ -42,10 +41,8 @@ BotVersionClient.prototype.registerEndpoints = function (endpoints) {
     );
   }
 
-  // Add to queue
   self._queue = self._queue.concat(endpoints);
 
-  // Schedule flush
   if (!self._flushTimer) {
     self._flushTimer = setTimeout(function () {
       self._flush();
@@ -124,37 +121,6 @@ BotVersionClient.prototype.getEndpoints = function () {
   return self._get(
     "/api/sdk/get-endpoints?workspaceKey=" + encodeURIComponent(self.apiKey),
   );
-};
-
-// Send user message to agent
-BotVersionClient.prototype.agentChat = function (payload) {
-  console.log("[BotVersion] agentChat payload:", JSON.stringify(payload));
-  console.log("[BotVersion] this.chatbotId:", this.chatbotId);
-  console.log("[BotVersion] this.apiKey:", this.apiKey);
-  return this._post(
-    "/api/chatbot/widget-chat",
-    Object.assign({
-      chatbotId: payload.chatbotId, // ← use payload, not this.chatbotId
-      publicKey: payload.publicKey,
-      query: payload.message,
-      previousChats: payload.conversationHistory,
-      pageContext: payload.pageContext,
-      userContext: payload.userContext,
-    }),
-  );
-};
-
-// Send API call result back to agent
-BotVersionClient.prototype.agentToolResult = function (
-  sessionToken,
-  result,
-  sessionData,
-) {
-  return this._post("/api/sdk/agent-tool-result", {
-    sessionToken,
-    sessionData: sessionData || null,
-    result,
-  });
 };
 
 /**

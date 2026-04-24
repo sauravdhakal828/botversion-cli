@@ -89,53 +89,53 @@ async function promptEntryPoint() {
   return filePath;
 }
 
-async function promptAuthLibrary() {
-  const choices = [
-    {
-      label: "next-auth v4",
-      value: { name: "next-auth", version: "v4", supported: true },
-    },
-    {
-      label: "next-auth v5 (Auth.js)",
-      value: { name: "next-auth", version: "v5", supported: true },
-    },
-    { label: "Clerk", value: { name: "clerk", supported: true } },
-    { label: "Supabase Auth", value: { name: "supabase", supported: true } },
-    { label: "Passport.js", value: { name: "passport", supported: true } },
-    { label: "JWT (jsonwebtoken)", value: { name: "jwt", supported: true } },
-    {
-      label: "express-session",
-      value: { name: "express-session", supported: true },
-    },
-    { label: "Other / Custom", value: { name: "custom", supported: false } },
-    { label: "No auth", value: { name: null, supported: false } },
-  ];
-
-  const choice = await askChoice(
-    "We couldn't detect your auth library. Which one are you using?",
-    choices,
-  );
-
-  return choice.value;
-}
-
-async function promptNextAuthConfigPath() {
-  console.log(
-    "\n  ⚠️  We couldn't find your authOptions location automatically.",
-  );
-  const filePath = await ask(
-    "  Enter the path to your authOptions file (e.g. lib/auth.ts): ",
-  );
-  return filePath;
-}
-
 async function promptForce(conflictFile) {
   console.log(`\n  ⚠️  File already exists: ${conflictFile}`);
   return confirm("  Overwrite it? (a backup will be created)", false);
 }
 
+const CONFIG_FILES = [
+  "next.config.js",
+  "next.config.ts",
+  "vite.config.js",
+  "vite.config.ts",
+  "webpack.config.js",
+  "webpack.config.ts",
+  "nuxt.config.js",
+  "nuxt.config.ts",
+];
+
 async function promptMissingListenCall(entryPoint) {
+  const path = require("path");
+  const entryFileName = path.basename(entryPoint || "");
+  const isConfigFile = CONFIG_FILES.includes(entryFileName);
+
   console.log(`\n  ⚠️  We couldn't find app.listen() in ${entryPoint}`);
+
+  if (isConfigFile) {
+    console.log(
+      `\n  ❌  "${entryFileName}" is a config file, not a server file.`,
+    );
+    console.log("      Appending server code here would break your project.");
+    console.log("  Options:");
+
+    const choices = [
+      {
+        label: "Enter the correct server file path manually",
+        value: "manual_path",
+      },
+      { label: "Skip — I'll add it manually", value: "skip" },
+    ];
+
+    const choice = await askChoice("How would you like to proceed?", choices);
+    if (choice.value === "manual_path") {
+      const filePath = await ask("  Enter file path: ");
+      return { action: "manual_path", filePath };
+    }
+    return { action: choice.value };
+  }
+
+  // Normal flow — entry point is not a config file
   console.log("  Options:");
   const choices = [
     { label: "Append to end of file", value: "append" },
@@ -158,8 +158,6 @@ module.exports = {
   confirm,
   promptMonorepoPackage,
   promptEntryPoint,
-  promptAuthLibrary,
-  promptNextAuthConfigPath,
   promptForce,
   promptMissingListenCall,
 };

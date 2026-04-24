@@ -123,7 +123,6 @@ async function main() {
   // ── Detect environment ────────────────────────────────────────────────────
   step("Scanning your project...");
 
-  // Handle monorepo
   const monorepoInfo = detector.detectMonorepo(cwd);
   if (monorepoInfo.isMonorepo) {
     warn(
@@ -131,7 +130,6 @@ async function main() {
     );
   }
 
-  // Always detect from root so frontend/backend split works correctly
   const detected = detector.detect(cwd);
 
   // ── Check if already initialized ─────────────────────────────────────────
@@ -168,39 +166,88 @@ async function main() {
     `Module system: ${detected.moduleSystem === "esm" ? "ES Modules" : "CommonJS"}`,
   );
   info(`Language: ${detected.isTypeScript ? "TypeScript" : "JavaScript"}`);
-
-  // ── Auth detection ────────────────────────────────────────────────────────
-  step("Detecting auth library...");
-
-  let auth = detected.auth;
-
-  if (!auth.name) {
-    warn("No auth library detected automatically.");
-    auth = await prompts.promptAuthLibrary();
-    detected.auth = auth;
-  } else if (!auth.supported) {
-    warn(`Detected auth: ${auth.name} (not yet supported for auto-setup)`);
-    warn("Will set up without user context — you can add it manually later.");
-    const proceed = await prompts.confirm("Continue without auth?", true);
-    if (!proceed) process.exit(0);
-    auth = { name: auth.name, supported: false };
-    detected.auth = auth;
-  } else {
-    const versionLabel = auth.version ? ` (${auth.version})` : "";
-    success(`Auth: ${auth.name}${versionLabel}`);
-  }
-
-  // ── Package manager ───────────────────────────────────────────────────────
   info(`Package manager: ${detected.packageManager}`);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // FRAMEWORK: EXPRESS
+  // FRAMEWORK: NEXT.JS
   // ─────────────────────────────────────────────────────────────────────────
-  if (detected.framework.name === "express") {
+  if (detected.framework.name === "next") {
+    await setupNextJs(detected, args, changes, projectInfo);
+
+    // ── Also check for a separate Express backend folder ──────────────────
+    step("Checking for separate backend...");
+    const backendDirs = ["backend", "server", "api", "services"];
+    let expressBackendFound = false;
+
+    for (const dir of backendDirs) {
+      const backendPath = path.join(cwd, dir);
+      if (!fs.existsSync(backendPath)) continue;
+
+      // Check if this folder has its own package.json with express
+      const backendPkg = detector.readPackageJson(backendPath);
+      const backendDeps = {
+        ...((backendPkg && backendPkg.dependencies) || {}),
+        ...((backendPkg && backendPkg.devDependencies) || {}),
+      };
+      const hasExpress = !!backendDeps["express"];
+
+      // Or check if any JS file in this folder has express routes
+      const hasExpressFiles = fs.readdirSync(backendPath).some((file) => {
+        if (!/\.(js|ts)$/.test(file)) return false;
+        try {
+          const content = fs.readFileSync(path.join(backendPath, file), "utf8");
+          return (
+            content.includes("express()") ||
+            content.includes("express(") || // factory pattern
+            /class\s+\w+\s+extends\s+express/.test(content) || // subclass
+            /(?:create|make|build|setup)App\s*\(/.test(content) || // factory fn
+            /(?:app|router|server)\.(get|post|put|delete|patch|all)\s*\(\s*['"`]\//.test(
+              content,
+            )
+          );
+        } catch {
+          return false;
+        }
+      });
+
+      if (hasExpress || hasExpressFiles) {
+        expressBackendFound = true;
+        warn(`Found Express backend in "${dir}/" folder.`);
+
+        // Detect the backend separately
+        const backendDetected = detector.detect(backendPath);
+
+        if (backendDetected.entryPoint) {
+          success(
+            `Backend entry point: ${path.relative(cwd, backendDetected.entryPoint)}`,
+          );
+          await setupExpress(backendDetected, args, changes, projectInfo);
+        } else {
+          warn(`Could not find entry point in "${dir}/" automatically.`);
+          const manualPath = await prompts.promptEntryPoint();
+          const resolvedPath = path.resolve(backendPath, manualPath);
+          if (fs.existsSync(resolvedPath)) {
+            backendDetected.entryPoint = resolvedPath;
+            await setupExpress(backendDetected, args, changes, projectInfo);
+          } else {
+            error(`File not found: ${resolvedPath}`);
+          }
+        }
+        break; // only set up one backend
+      }
+    }
+
+    if (!expressBackendFound) {
+      info("No separate Express backend found — skipping.");
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // FRAMEWORK: EXPRESS ONLY
+  // ─────────────────────────────────────────────────────────────────────────
+  else if (detected.framework.name === "express") {
     await setupExpress(detected, args, changes, projectInfo);
 
-    // ── Inject script tag into frontend (Express only) ──────────────────
-    // Next.js handles its own script tag injection inside setupNextJs
     if (detected.frontendMainFile && projectInfo) {
       const scriptTag = generator.generateScriptTag(projectInfo);
       const result = writer.injectScriptTag(
@@ -240,45 +287,6 @@ async function main() {
     }
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // FRAMEWORK: NEXT.JS
-  // ─────────────────────────────────────────────────────────────────────────
-  else if (detected.framework.name === "next") {
-    await setupNextJs(detected, args, changes, projectInfo);
-  }
-
-  // ── Write API key to .env / .env.local ────────────────────────────────────
-  const envFileName =
-    detected.framework.name === "next" ? ".env.local" : ".env";
-  const envPath = path.join(detected.cwd, envFileName);
-  const envLine = `BOTVERSION_API_KEY=${args.key}`;
-  const envContent = fs.existsSync(envPath)
-    ? fs.readFileSync(envPath, "utf8")
-    : "";
-
-  if (!envContent.includes("BOTVERSION_API_KEY")) {
-    const writeEnv = await prompts.confirm(
-      `Add BOTVERSION_API_KEY to ${envFileName}?`,
-      true,
-    );
-
-    if (writeEnv) {
-      const envAddition = "\n\n# BotVersion API key\n" + envLine + "\n";
-      fs.writeFileSync(envPath, envContent.trimEnd() + envAddition, "utf8");
-      success(`Added BOTVERSION_API_KEY to ${envFileName}`);
-      changes.modified.push(envFileName);
-    } else {
-      warn(`Skipped — add this manually to your ${envFileName}:`);
-      log(`\n    # BotVersion API key`);
-      log(`    BOTVERSION_API_KEY=${args.key}\n`);
-      changes.manual.push(
-        `Add to your ${envFileName}:\n\n    # BotVersion API key\n    BOTVERSION_API_KEY=${args.key}`,
-      );
-    }
-  } else {
-    info(`BOTVERSION_API_KEY already exists in ${envFileName} — skipping.`);
-  }
-
   // ── Print summary ─────────────────────────────────────────────────────────
   log(writer.writeSummary(changes));
 }
@@ -288,7 +296,6 @@ async function main() {
 async function setupExpress(detected, args, changes, projectInfo) {
   step("Setting up Express...");
 
-  // Find entry point
   let entryPoint = detected.entryPoint;
 
   if (!entryPoint || !fs.existsSync(entryPoint)) {
@@ -303,6 +310,99 @@ async function setupExpress(detected, args, changes, projectInfo) {
   }
 
   success(`Entry point: ${path.relative(detected.cwd, entryPoint)}`);
+  let entryPointTracked = false;
+
+  // ── Write API key to .env ──────────────────────────────────────────────
+  const shouldWriteEnv = await prompts.confirm(
+    "  Add BOTVERSION_API_KEY to your .env file?",
+    true,
+  );
+
+  if (shouldWriteEnv) {
+    const envResult = writer.writeEnvKey(
+      detected.cwd,
+      "BOTVERSION_API_KEY",
+      args.key,
+      "express",
+    );
+    if (envResult.success) {
+      success(
+        `Added BOTVERSION_API_KEY to ${path.relative(detected.cwd, envResult.path)}`,
+      );
+      changes.modified.push(path.relative(detected.cwd, envResult.path));
+    } else if (envResult.reason === "already_exists") {
+      info("BOTVERSION_API_KEY already exists in .env — skipping.");
+    } else {
+      warn("Could not write to .env — add this manually:");
+      changes.manual.push(
+        `Add to your .env file:\n\n    BOTVERSION_API_KEY=${args.key}`,
+      );
+    }
+  } else {
+    info("Skipped — add this manually to your .env file:");
+    changes.manual.push(
+      `Add to your .env file:\n\n    BOTVERSION_API_KEY=${args.key}`,
+    );
+  }
+
+  // ── Inject CORS ──────────────────────────────────────────────────────────
+  step("Configuring CORS...");
+
+  const allowedOrigins = [];
+  if (projectInfo.apiUrl) allowedOrigins.push(projectInfo.apiUrl);
+  if (projectInfo.cdnUrl) allowedOrigins.push(projectInfo.cdnUrl);
+  if (allowedOrigins.length === 0) allowedOrigins.push("http://localhost:3000");
+
+  if (detector.detectCors(entryPoint, "express")) {
+    info("CORS already configured — skipping.");
+  } else {
+    // Install cors package
+    const { execSync } = require("child_process");
+    const installCmd =
+      detected.packageManager === "yarn"
+        ? "yarn add cors"
+        : detected.packageManager === "pnpm"
+          ? "pnpm add cors"
+          : detected.packageManager === "bun"
+            ? "bun add cors"
+            : "npm install cors";
+
+    try {
+      execSync(installCmd, { cwd: detected.cwd, stdio: "inherit" });
+      success("cors package installed successfully");
+    } catch (err) {
+      warn("Could not install cors automatically.");
+      changes.manual.push(`Install cors manually:\n\n    ${installCmd}`);
+    }
+
+    const corsCode = generator.generateExpressCors(
+      detected.appVarName || "app",
+      allowedOrigins,
+    );
+    const corsResult = writer.injectCors(
+      entryPoint,
+      corsCode,
+      detected.appVarName || "app",
+    );
+
+    if (corsResult.success) {
+      success(
+        `Added CORS configuration to ${path.relative(detected.cwd, entryPoint)}`,
+      );
+      if (!entryPointTracked) {
+        changes.modified.push(path.relative(detected.cwd, entryPoint));
+        entryPointTracked = true;
+      }
+      if (corsResult.backup) changes.backups.push(corsResult.backup);
+    } else if (corsResult.reason === "already_exists") {
+      info("CORS already configured — skipping.");
+    } else {
+      warn("Could not auto-configure CORS — add manually:");
+      changes.manual.push(
+        generator.generateExpressCorsManualInstructions(allowedOrigins),
+      );
+    }
+  }
 
   if (!detected.hasDotenv) {
     warn("dotenv not detected — installing it automatically...");
@@ -318,13 +418,9 @@ async function setupExpress(detected, args, changes, projectInfo) {
             : "npm install dotenv";
 
     try {
-      execSync(installCmd, {
-        cwd: detected.cwd,
-        stdio: "inherit",
-      });
+      execSync(installCmd, { cwd: detected.cwd, stdio: "inherit" });
       success("dotenv installed successfully");
 
-      // Inject require('dotenv').config() at top of entry file
       const isESM = detected.moduleSystem === "esm";
       const dotenvLine = isESM
         ? `import 'dotenv/config';`
@@ -337,7 +433,6 @@ async function setupExpress(detected, args, changes, projectInfo) {
         if (injectResult.backup) changes.backups.push(injectResult.backup);
       }
 
-      // Mark as having dotenv now so generator uses process.env
       detected.hasDotenv = true;
     } catch (err) {
       warn("Could not install dotenv automatically.");
@@ -350,7 +445,6 @@ async function setupExpress(detected, args, changes, projectInfo) {
     }
   }
 
-  // Generate the init code
   const generated = generator.generateExpressInit(detected, args.key);
 
   // PATTERN 2: Separate app file with module.exports = app
@@ -373,7 +467,7 @@ async function setupExpress(detected, args, changes, projectInfo) {
     }
   }
 
-  // PATTERN 1 & 3 & 4: app.listen() or server.listen() in entry file
+  // PATTERN 1 & 3 & 4: app.listen() in entry file
   else if (
     detected.listenCall ||
     detected.listenInsideCallback ||
@@ -387,7 +481,10 @@ async function setupExpress(detected, args, changes, projectInfo) {
 
     if (result.success) {
       success(`Injected BotVersion.init() before app.listen()`);
-      changes.modified.push(path.relative(detected.cwd, entryPoint));
+      if (!entryPointTracked) {
+        changes.modified.push(path.relative(detected.cwd, entryPoint));
+        entryPointTracked = true;
+      }
       if (result.backup) changes.backups.push(result.backup);
     } else if (result.reason === "already_exists") {
       warn("BotVersion already found in entry point — skipping injection.");
@@ -442,18 +539,117 @@ async function setupNextJs(detected, args, changes, projectInfo) {
   const nextInfo = detected.next;
   const baseDir = nextInfo.baseDir;
 
+  // ── Write API key to .env ──────────────────────────────────────────────
+  const shouldWriteEnv = await prompts.confirm(
+    "  Add BOTVERSION_API_KEY to your .env file automatically?",
+    true,
+  );
+
+  if (shouldWriteEnv) {
+    const envResult = writer.writeEnvKey(
+      detected.cwd,
+      "BOTVERSION_API_KEY",
+      args.key,
+      "next",
+    );
+    if (envResult.success) {
+      success(
+        `Added BOTVERSION_API_KEY to ${path.relative(detected.cwd, envResult.path)}`,
+      );
+      changes.modified.push(path.relative(detected.cwd, envResult.path));
+    } else if (envResult.reason === "already_exists") {
+      info("BOTVERSION_API_KEY already exists in .env — skipping.");
+    } else {
+      warn("Could not write to .env — add this manually:");
+      changes.manual.push(
+        `Add to your .env file:\n\n    BOTVERSION_API_KEY=${args.key}`,
+      );
+    }
+  } else {
+    info("Skipped — add this manually to your .env file:");
+    changes.manual.push(
+      `Add to your .env file:\n\n    BOTVERSION_API_KEY=${args.key}`,
+    );
+  }
+
   info2(
     `Router: ${nextInfo.pagesRouter ? "Pages" : ""}${nextInfo.pagesRouter && nextInfo.appRouter ? " + " : ""}${nextInfo.appRouter ? "App" : ""}`,
   );
 
-  // ── next-auth config location ─────────────────────────────────────────────
-  if (detected.auth.name === "next-auth" && !detected.nextAuthConfig) {
-    warn("Could not find authOptions location automatically.");
-    const configPath = await prompts.promptNextAuthConfigPath();
-    detected.nextAuthConfig = {
-      path: path.resolve(detected.cwd, configPath),
-      relativePath: configPath,
-    };
+  // ── CORS middleware for Next.js ──────────────────────────────────────────
+  step("Configuring CORS...");
+
+  const allowedOrigins = [];
+  if (projectInfo.apiUrl) allowedOrigins.push(projectInfo.apiUrl);
+  if (projectInfo.cdnUrl) allowedOrigins.push(projectInfo.cdnUrl);
+  if (allowedOrigins.length === 0) allowedOrigins.push("http://localhost:3000");
+
+  const middlewareInfo = detector.detectNextJsMiddleware(detected.cwd);
+
+  if (middlewareInfo.hasCors) {
+    // Already has CORS — skip entirely
+    info("CORS already configured in middleware — skipping.");
+  } else if (middlewareInfo.exists) {
+    // Middleware exists but no CORS — inject into it
+    info(
+      `Found existing middleware at ${path.relative(detected.cwd, middlewareInfo.path)} — injecting CORS...`,
+    );
+
+    const injectResult = writer.injectCorsIntoMiddleware(
+      middlewareInfo.path,
+      allowedOrigins,
+    );
+
+    if (injectResult.success) {
+      success(
+        `Injected CORS into ${path.relative(detected.cwd, middlewareInfo.path)}`,
+      );
+      changes.modified.push(path.relative(detected.cwd, middlewareInfo.path));
+      if (injectResult.backup) changes.backups.push(injectResult.backup);
+    } else if (injectResult.reason === "already_exists") {
+      info("CORS already configured in middleware — skipping.");
+    } else {
+      warn("Could not inject CORS into existing middleware — add manually:");
+      changes.manual.push(
+        `Add to your middleware file (${path.relative(detected.cwd, middlewareInfo.path)}):\n\n` +
+          `  response.headers.set('Access-Control-Allow-Origin', '${allowedOrigins[0]}');\n` +
+          `  response.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');\n` +
+          `  response.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');`,
+      );
+    }
+  } else {
+    // No middleware file — create one
+    const isESM = detected.moduleSystem === "esm";
+    const middlewareContent = detected.isTypeScript
+      ? generator.generateNextJsMiddleware(allowedOrigins)
+      : generator.generateNextJsMiddlewareJs(allowedOrigins, isESM);
+
+    const middlewareFile = detected.hasSrc
+      ? path.join(
+          detected.cwd,
+          "src",
+          detected.isTypeScript ? "middleware.ts" : "middleware.js",
+        )
+      : path.join(
+          detected.cwd,
+          detected.isTypeScript ? "middleware.ts" : "middleware.js",
+        );
+
+    const middlewareResult = writer.createFile(
+      middlewareFile,
+      middlewareContent,
+      args.force,
+    );
+
+    if (middlewareResult.success) {
+      success(`Created ${path.relative(detected.cwd, middlewareFile)}`);
+      changes.created.push(path.relative(detected.cwd, middlewareFile));
+    } else {
+      warn("Could not create middleware file — add CORS manually.");
+      changes.manual.push(
+        `Create middleware.ts in your project root with CORS config for: ${allowedOrigins.join(", ")}`,
+      );
+    }
   }
 
   // ── 1. Create instrumentation.js ──────────────────────────────────────────
@@ -501,61 +697,7 @@ async function setupNextJs(detected, args, changes, projectInfo) {
     );
   }
 
-  // ── 3. Pages Router chat route ────────────────────────────────────────────
-  if (nextInfo.pagesRouter) {
-    const pagesBase = path.join(baseDir, "pages");
-    const chatDir = path.join(pagesBase, "api", "botversion");
-    const chatFile = path.join(chatDir, `chat${instrExt}`);
-
-    const chatContent = generator.generateNextPagesChatRoute(detected);
-    const chatResult = writer.createFile(chatFile, chatContent, args.force);
-
-    const relPath = `${nextInfo.srcDir ? "src/" : ""}pages/api/botversion/chat${instrExt}`;
-
-    if (chatResult.success) {
-      success(`Created ${relPath}`);
-      changes.created.push(relPath);
-    } else if (chatResult.reason === "already_exists") {
-      const overwrite = await prompts.promptForce(relPath);
-      if (overwrite) {
-        writer.createFile(chatFile, chatContent, true);
-        success(`Overwrote ${relPath}`);
-        changes.modified.push(relPath);
-      } else {
-        warn(`Skipped ${relPath}`);
-      }
-    }
-  }
-
-  // ── 4. App Router chat route ──────────────────────────────────────────────
-  if (nextInfo.appRouter) {
-    const appBase = path.join(baseDir, "app");
-    const chatDir = path.join(appBase, "api", "botversion", "chat");
-    const chatFile = path.join(chatDir, `route${instrExt}`);
-
-    const chatContent = generator.generateNextAppChatRoute(detected);
-    const relPath = `${nextInfo.srcDir ? "src/" : ""}app/api/botversion/chat/route${instrExt}`;
-
-    const chatResult = writer.createFile(chatFile, chatContent, args.force);
-
-    if (chatResult.success) {
-      success(`Created ${relPath}`);
-      changes.created.push(relPath);
-    } else if (chatResult.reason === "already_exists") {
-      const overwrite = await prompts.promptForce(relPath);
-      if (overwrite) {
-        writer.createFile(chatFile, chatContent, true);
-        success(`Overwrote ${relPath}`);
-        changes.modified.push(relPath);
-      } else {
-        warn(`Skipped ${relPath}`);
-      }
-    }
-  }
-
-  // ── 5. Inject script tag into frontend ───────────────────────────────────
-  // For Next.js the frontend IS the same project
-  // frontendMainFile will be _app.js or layout.js
+  // ── 3. Inject script tag into frontend ───────────────────────────────────
   if (detected.frontendMainFile && projectInfo) {
     const scriptTag = generator.generateScriptTag(projectInfo);
     const result = writer.injectScriptTag(

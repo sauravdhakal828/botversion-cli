@@ -221,30 +221,6 @@ function injectBeforeExport(filePath, codeToInject, appVarName) {
   return { success: true, backup };
 }
 
-// ─── MERGE INTO EXISTING MIDDLEWARE (Next.js) ────────────────────────────────
-
-function mergeIntoMiddleware(middlewarePath, authName) {
-  const content = fs.readFileSync(middlewarePath, "utf8");
-
-  // If BotVersion already there, skip
-  if (content.includes("botversion")) {
-    return { success: false, reason: "already_exists" };
-  }
-
-  // We don't auto-modify complex middleware — too risky
-  // Instead return a comment to add manually
-  const comment = `
-// BotVersion: No changes needed to middleware.
-// Your auth (${authName}) is handled in pages/api/botversion/chat.js
-`;
-
-  return {
-    success: true,
-    noModification: true,
-    note: comment.trim(),
-  };
-}
-
 // ─── WRITE SUMMARY OF ALL CHANGES ────────────────────────────────────────────
 
 function writeSummary(changes) {
@@ -351,7 +327,6 @@ function injectIntoNextApp(filePath, content, scriptTag, backup) {
         data-api-url="${extractAttr(scriptTag, "data-api-url")}"
         data-project-id="${extractAttr(scriptTag, "data-project-id")}"
         data-public-key="${extractAttr(scriptTag, "data-public-key")}"
-        data-proxy-url="/api/botversion/chat"
         strategy="afterInteractive"
       />`;
 
@@ -439,7 +414,6 @@ function injectIntoNextLayout(filePath, content, scriptTag, backup) {
         data-api-url="${extractAttr(scriptTag, "data-api-url")}"
         data-project-id="${extractAttr(scriptTag, "data-project-id")}"
         data-public-key="${extractAttr(scriptTag, "data-public-key")}"
-        data-proxy-url="/api/botversion/chat"
         strategy="afterInteractive"
       />`;
 
@@ -481,15 +455,226 @@ function extractAttr(scriptTag, attr) {
   return match ? match[1] : "";
 }
 
+// ─── INJECT CORS INTO EXPRESS FILE ───────────────────────────────────────────
+
+function injectCors(filePath, corsCode, appVarName) {
+  appVarName = appVarName || "app";
+
+  const content = fs.readFileSync(filePath, "utf8");
+
+  // Already has CORS — skip
+  if (
+    content.includes("cors(") ||
+    content.includes("require('cors')") ||
+    content.includes('require("cors")')
+  ) {
+    return { success: false, reason: "already_exists" };
+  }
+
+  const backup = backupFile(filePath);
+  const lines = content.split("\n");
+
+  // Find the app = express() line and inject CORS right after it
+  const appLineRegex = new RegExp(
+    `(?:const|let|var)\\s+${appVarName}\\s*=\\s*(?:express\\s*\\(|require)`,
+  );
+  let appLineIndex = -1;
+
+  for (let i = 0; i < lines.length; i++) {
+    if (appLineRegex.test(lines[i]) || lines[i].includes("express()")) {
+      appLineIndex = i;
+      break;
+    }
+  }
+
+  if (appLineIndex === -1) {
+    // Fallback — append to end of file
+    const newContent = content.trimEnd() + "\n\n" + corsCode + "\n";
+    fs.writeFileSync(filePath, newContent, "utf8");
+    return { success: true, backup, method: "append" };
+  }
+
+  const before = lines.slice(0, appLineIndex + 1);
+  const after = lines.slice(appLineIndex + 1);
+  const injectedLines = ["", ...corsCode.split("\n"), ""];
+  const newContent = [...before, ...injectedLines, ...after].join("\n");
+
+  fs.writeFileSync(filePath, newContent, "utf8");
+  return { success: true, backup, method: "inject" };
+}
+
+// ─── WRITE API KEY TO .ENV FILE ───────────────────────────────────────────────
+
+function writeEnvKey(cwd, key, value, framework) {
+  const envCandidates =
+    framework === "next"
+      ? [".env.local", ".env", ".env.development", ".env.development.local"]
+      : [".env", ".env.development", ".env.local"];
+
+  let envPath = null;
+
+  // Use existing .env file if found
+  for (const candidate of envCandidates) {
+    const fullPath = path.join(cwd, candidate);
+    if (fs.existsSync(fullPath)) {
+      envPath = fullPath;
+      break;
+    }
+  }
+
+  // No .env file found — create .env
+  if (!envPath) {
+    envPath = path.join(cwd, ".env");
+    fs.writeFileSync(envPath, "", "utf8");
+  }
+
+  const content = fs.readFileSync(envPath, "utf8");
+
+  // Key already exists — skip
+  if (content.includes(key)) {
+    return { success: false, reason: "already_exists", path: envPath };
+  }
+
+  // Append key to file
+  const newLine =
+    content === "" || content.endsWith("\n")
+      ? `${key}=${value}\n`
+      : `\n${key}=${value}\n`;
+
+  fs.appendFileSync(envPath, newLine, "utf8");
+  return { success: true, path: envPath };
+}
+
+// ─── INJECT CORS INTO EXISTING NEXT.JS MIDDLEWARE ────────────────────────────
+
+function injectCorsIntoMiddleware(filePath, allowedOrigins) {
+  const content = fs.readFileSync(filePath, "utf8");
+
+  // Already has CORS — skip
+  if (content.includes("Access-Control-Allow-Origin")) {
+    return { success: false, reason: "already_exists" };
+  }
+
+  const backup = backupFile(filePath);
+  const lines = content.split("\n");
+
+  // Detect actual request parameter name from middleware signature
+  let requestParamName = "request"; // default
+  const sigMatch =
+    content.match(/function\s+middleware\s*\(\s*(\w+)/) ||
+    content.match(/middleware\s*=\s*(?:async\s*)?\(\s*(\w+)/) ||
+    content.match(/middleware\s*=\s*(?:async\s*)?(\w+)\s*=>/);
+  if (sigMatch) requestParamName = sigMatch[1];
+
+  // Detect actual response variable name
+  let responseVarName = "response"; // default
+  const resMatch =
+    content.match(/const\s+(\w+)\s*=\s*NextResponse\.next\(\)/) ||
+    content.match(/let\s+(\w+)\s*=\s*NextResponse\.next\(\)/) ||
+    content.match(/var\s+(\w+)\s*=\s*NextResponse\.next\(\)/);
+  if (resMatch) responseVarName = resMatch[1];
+
+  // The CORS headers to inject
+  const corsLines = [
+    ``,
+    `  // CORS — auto-added by botversion-sdk`,
+    `  const __bvOrigin = ${requestParamName}.headers.get('origin') || '';`,
+    `  const __bvAllowed = ${JSON.stringify(allowedOrigins)};`,
+    `  const __bvIsAllowed = __bvAllowed.some(o => __bvOrigin.startsWith(o));`,
+  ].join("\n");
+
+  const corsHeaders = [
+    ``,
+    `  // BotVersion CORS headers`,
+    `  if (__bvIsAllowed) {`,
+    `    ${responseVarName}.headers.set('Access-Control-Allow-Origin', __bvOrigin);`,
+    `    ${responseVarName}.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');`,
+    `    ${responseVarName}.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');`,
+    `    ${responseVarName}.headers.set('Access-Control-Allow-Credentials', 'true');`,
+    `  }`,
+  ].join("\n");
+
+  // Strategy 1: find "const response = NextResponse.next()"
+  // and inject CORS checks before it, then inject headers after it
+  let newContent = content;
+
+  const nextResponseLine = lines.findIndex(
+    (l) =>
+      l.includes("NextResponse.next()") ||
+      l.includes("NextResponse.redirect") ||
+      l.includes("NextResponse.rewrite"),
+  );
+
+  if (nextResponseLine !== -1) {
+    // Inject origin check before NextResponse line
+    const before = lines.slice(0, nextResponseLine);
+    const after = lines.slice(nextResponseLine);
+
+    // Find return statement after NextResponse to inject headers before it
+    let returnLine = -1;
+    for (let i = nextResponseLine; i < lines.length; i++) {
+      if (/^\s*return\s+/.test(lines[i])) {
+        returnLine = i;
+        break;
+      }
+    }
+
+    if (returnLine !== -1) {
+      const middle = lines.slice(nextResponseLine, returnLine);
+      const end = lines.slice(returnLine);
+
+      newContent = [...before, corsLines, ...middle, corsHeaders, ...end].join(
+        "\n",
+      );
+    } else {
+      // No return found — inject at end of function
+      newContent = [...before, corsLines, ...after, corsHeaders].join("\n");
+    }
+  } else {
+    // Strategy 2: No NextResponse found
+    // Find the export function middleware line and inject at the start of it
+    let funcBodyStart = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (
+        /export\s+(default\s+)?function\s+middleware/.test(lines[i]) ||
+        /export\s+const\s+middleware/.test(lines[i])
+      ) {
+        // Find opening brace
+        for (let j = i; j < lines.length; j++) {
+          if (lines[j].includes("{")) {
+            funcBodyStart = j;
+            break;
+          }
+        }
+        break;
+      }
+    }
+
+    if (funcBodyStart !== -1) {
+      const before = lines.slice(0, funcBodyStart + 1);
+      const after = lines.slice(funcBodyStart + 1);
+      newContent = [...before, corsLines, corsHeaders, ...after].join("\n");
+    } else {
+      // Last resort — append to end of file
+      newContent = content.trimEnd() + "\n\n" + corsLines + corsHeaders + "\n";
+    }
+  }
+
+  fs.writeFileSync(filePath, newContent, "utf8");
+  return { success: true, backup };
+}
+
 module.exports = {
   writeFile,
   backupFile,
   injectBeforeListen,
   appendToFile,
   createFile,
-  mergeIntoMiddleware,
   writeSummary,
   injectBeforeExport,
   injectScriptTag,
   injectAtTop,
+  injectCors,
+  writeEnvKey,
+  injectCorsIntoMiddleware,
 };

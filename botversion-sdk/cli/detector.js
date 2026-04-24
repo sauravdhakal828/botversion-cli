@@ -356,7 +356,7 @@ function detectMonorepo(cwd) {
 
 // ─── FRAMEWORK DETECTION ─────────────────────────────────────────────────────
 
-const SUPPORTED_FRAMEWORKS = ["express", "next"];
+const SUPPORTED_FRAMEWORKS = ["next", "express"];
 const UNSUPPORTED_FRAMEWORKS = [
   "fastify",
   "koa",
@@ -376,6 +376,10 @@ function detectFramework(pkg) {
   for (const fw of UNSUPPORTED_FRAMEWORKS) {
     if (deps[fw]) return { name: fw, supported: false };
   }
+
+  // If BOTH next and express exist, always pick next
+  // because express is just being used as a custom server wrapper
+  if (deps["next"]) return { name: "next", supported: true };
 
   for (const fw of SUPPORTED_FRAMEWORKS) {
     if (deps[fw]) return { name: fw, supported: true };
@@ -462,61 +466,250 @@ function detectNextVersion(pkg) {
   return { raw: version, major };
 }
 
-// ─── EXPRESS ENTRY POINT DETECTION ───────────────────────────────────────────
+// ─── SCORING FUNCTIONS ────────────────────────────────────────────────────────
 
-function detectExpressEntry(cwd, pkg) {
-  // Strategy 1: "main" field in package.json
-  if (pkg && pkg.main) {
-    const mainPath = path.join(cwd, pkg.main);
-    if (fs.existsSync(mainPath)) return mainPath;
+function scoreExpressFile(content, filePath) {
+  let score = 0;
+  const filename = path.basename(filePath);
+
+  // High confidence — direct instantiation
+  if (/express\s*\(\s*\)/.test(content)) score += 10;
+  // High confidence — subclass pattern
+  if (/class\s+\w+\s+extends\s+express/.test(content)) score += 10;
+  // High confidence — factory function
+  if (/(?:function|const|let|var)\s+(create|make|build|setup)App/.test(content))
+    score += 8;
+  // High confidence — server started here
+  if (/\.listen\s*\(/.test(content)) score += 8;
+  // Medium — registers routers (orchestrator file)
+  if (/\.use\s*\(\s*['"`\/]/.test(content)) score += 5;
+  // Medium — mounts middleware
+  if (/app\.use\s*\(/.test(content)) score += 4;
+  // Low — just imports express
+  if (
+    /require\s*\(\s*['"]express['"]\s*\)|from\s+['"]express['"]/.test(content)
+  )
+    score += 1;
+
+  // Penalties — likely a router file
+  if (/^(?:const|let|var)\s+router\s*=\s*express\.Router\s*\(/m.test(content))
+    score -= 8;
+  // Penalties — test files
+  if (/(test_|_test|\.test\.|\.spec\.|conftest)/.test(filename)) score -= 10;
+  // Penalties — compiled output
+  if (/dist\/|build\//.test(filePath)) score -= 10;
+
+  // Filename bonus
+  if (["server.js", "server.ts", "app.js", "app.ts"].includes(filename))
+    score += 3;
+  if (["index.js", "index.ts", "main.js", "main.ts"].includes(filename))
+    score += 2;
+
+  return score;
+}
+
+// ─── PARSE ENTRY FROM CONFIG FILES ───────────────────────────────────────────
+
+function parseEntryFromConfigFiles(cwd) {
+  /**
+   * Extracts likely entry point from Procfile or Dockerfile.
+   * Covers patterns like:
+   *   Procfile:   web: node server.js
+   *   Procfile:   web: nodemon src/index.js
+   *   Dockerfile: CMD ["node", "server.js"]
+   *   Dockerfile: CMD ["nodemon", "src/index.js"]
+   */
+
+  function resolveFile(cwd, filePath) {
+    const full = path.join(cwd, filePath);
+    if (fs.existsSync(full)) return full;
+    return null;
   }
 
-  // Strategy 2: scripts.start / scripts.dev
+  // ── 1. Check Procfile ─────────────────────────────────────────────────────
+  const procfilePath = path.join(cwd, "Procfile");
+  if (fs.existsSync(procfilePath)) {
+    try {
+      const lines = fs.readFileSync(procfilePath, "utf8").split("\n");
+      for (const line of lines) {
+        if (!line.trim() || line.startsWith("#")) continue;
+
+        // node/nodemon/ts-node/tsx server.js or src/index.ts
+        const match = line.match(
+          /(?:node|nodemon|ts-node|ts-node-dev|tsx)\s+([\w./\\-]+\.[jt]s)/,
+        );
+        if (match) {
+          const result = resolveFile(cwd, match[1]);
+          if (result) return result;
+        }
+      }
+    } catch {}
+  }
+
+  // ── 2. Check Dockerfile ───────────────────────────────────────────────────
+  const dockerfilePath = path.join(cwd, "Dockerfile");
+  if (fs.existsSync(dockerfilePath)) {
+    try {
+      const lines = fs.readFileSync(dockerfilePath, "utf8").split("\n");
+      for (const line of lines) {
+        if (!line.trim() || line.startsWith("#")) continue;
+
+        // CMD ["node", "server.js"]
+        // CMD ["nodemon", "src/index.js"]
+        const cmdMatch = line.match(
+          /(?:CMD|ENTRYPOINT)\s*\[.*?"(?:node|nodemon|ts-node|tsx)",\s*"([\w./\\-]+\.[jt]s)"/,
+        );
+        if (cmdMatch) {
+          const result = resolveFile(cwd, cmdMatch[1]);
+          if (result) return result;
+        }
+
+        // CMD node server.js (shell form)
+        const shellMatch = line.match(
+          /(?:CMD|ENTRYPOINT)\s+(?:node|nodemon|ts-node|tsx)\s+([\w./\\-]+\.[jt]s)/,
+        );
+        if (shellMatch) {
+          const result = resolveFile(cwd, shellMatch[1]);
+          if (result) return result;
+        }
+      }
+    } catch {}
+  }
+
+  return null;
+}
+
+function detectExpressEntry(cwd, pkg) {
+  const SKIP_ENTRY_DIRS = ["dist", "build", "out", ".next", "coverage"];
+
+  function isCompiledPath(filePath) {
+    const normalized = filePath.replace(/\\/g, "/");
+    return SKIP_ENTRY_DIRS.some(
+      (dir) =>
+        normalized.includes(`/${dir}/`) ||
+        normalized.endsWith(`/${dir}`) ||
+        normalized.startsWith(`${dir}/`),
+    );
+  }
+
+  // ── Strategy 1: package.json "main" field ─────────────────────────────────
+  if (pkg && pkg.main) {
+    const mainPath = path.join(cwd, pkg.main);
+    if (fs.existsSync(mainPath) && !isCompiledPath(pkg.main)) {
+      return mainPath;
+    }
+  }
+
+  // ── Strategy 2: scripts.start / scripts.dev ───────────────────────────────
   if (pkg && pkg.scripts) {
-    const scripts = [pkg.scripts.start, pkg.scripts.dev, pkg.scripts.serve];
+    const scripts = [
+      pkg.scripts.dev,
+      pkg.scripts.serve,
+      pkg.scripts["dev-server"],
+      pkg.scripts.start,
+    ];
     for (const script of scripts) {
       if (!script) continue;
       const match = script.match(
-        /(?:node|nodemon|ts-node|tsx)\s+([^\s]+\.(js|ts))/,
+        /(?:node|nodemon|ts-node|ts-node-dev|tsx)\s+([^\s]+\.(js|ts))/,
       );
       if (match) {
-        const filePath = path.join(cwd, match[1]);
+        const scriptPath = match[1];
+        if (isCompiledPath(scriptPath)) continue;
+        const filePath = path.join(cwd, scriptPath);
+        if (fs.existsSync(filePath)) return filePath;
+      }
+    }
+
+    // Strategy 2b: compiled path fallback — find TS source equivalent
+    for (const script of scripts) {
+      if (!script) continue;
+      const match = script.match(
+        /(?:node|nodemon|ts-node|ts-node-dev|tsx)\s+([^\s]+\.(js|ts))/,
+      );
+      if (match) {
+        const tsEquivalent = match[1]
+          .replace(/^backend\/dist\//, "backend/")
+          .replace(/^dist\//, "")
+          .replace(/\.js$/, ".ts");
+        const filePath = path.join(cwd, tsEquivalent);
         if (fs.existsSync(filePath)) return filePath;
       }
     }
   }
 
-  // Strategy 3: common file names
-  const candidates = [
-    "server.js",
-    "server.ts",
-    "index.js",
-    "index.ts",
-    "app.js",
-    "app.ts",
-    "main.js",
-    "main.ts",
-    "src/server.js",
-    "src/server.ts",
-    "src/index.js",
-    "src/index.ts",
-    "src/app.js",
-    "src/app.ts",
-    "src/main.js",
-    "src/main.ts",
-  ];
+  // ── Strategy 3: Scoring — scan all JS/TS files ────────────────────────────
+  const skipDirs = new Set([
+    ...SKIP_DIRS,
+    "dist",
+    "build",
+    "out",
+    "coverage",
+    "tests",
+    "test",
+    "__tests__",
+    "scripts",
+    "docs",
+  ]);
 
-  for (const candidate of candidates) {
-    const filePath = path.join(cwd, candidate);
-    if (fs.existsSync(filePath)) {
-      const content = fs.readFileSync(filePath, "utf8");
-      if (content.includes("express") || content.includes("app.listen")) {
-        return filePath;
+  const scoredCandidates = [];
+
+  function walk(directory, depth) {
+    if (depth > 3) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(directory);
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (skipDirs.has(entry) || entry.startsWith(".")) continue;
+
+      const fullPath = path.join(directory, entry);
+      let stat;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        continue;
+      }
+
+      if (stat.isDirectory()) {
+        walk(fullPath, depth + 1);
+      } else if (/\.(js|ts)$/.test(entry) && !/\.d\.ts$/.test(entry)) {
+        try {
+          const content = fs.readFileSync(fullPath, "utf8");
+          const score = scoreExpressFile(content, fullPath);
+          if (score > 0) {
+            scoredCandidates.push({ score, filePath: fullPath });
+          }
+        } catch {
+          continue;
+        }
       }
     }
   }
 
-  // Strategy 4: any .js/.ts file containing app.listen()
+  walk(cwd, 0);
+
+  if (scoredCandidates.length > 0) {
+    scoredCandidates.sort((a, b) => b.score - a.score);
+    const best = scoredCandidates[0];
+
+    // If best score is weak, cross-check with Procfile/Dockerfile
+    if (best.score <= 3) {
+      const configEntry = parseEntryFromConfigFiles(cwd);
+      if (configEntry) return configEntry;
+    }
+
+    return best.filePath;
+  }
+
+  // ── Strategy 4: Procfile/Dockerfile fallback ──────────────────────────────
+  const configEntry = parseEntryFromConfigFiles(cwd);
+  if (configEntry) return configEntry;
+
+  // ── Strategy 5: Last resort deep scan ────────────────────────────────────
   return findFileWithContent(cwd, ".listen(", [".js", ".ts"], 2);
 }
 
@@ -572,136 +765,6 @@ function findCreateServer(filePath) {
       return { lineIndex: i, lineNumber: i + 1, content: lines[i] };
     }
   }
-  return null;
-}
-
-// ─── AUTH DETECTION ──────────────────────────────────────────────────────────
-
-const AUTH_LIBS = [
-  {
-    name: "next-auth",
-    packages: ["next-auth"],
-    detect: (deps) => !!deps["next-auth"],
-    getVersion: (deps) => {
-      const v = deps["next-auth"] || "";
-      const major = parseInt(v.replace(/[^0-9]/, ""), 10);
-      return major >= 5 ? "v5" : "v4";
-    },
-  },
-  {
-    name: "clerk",
-    packages: ["@clerk/nextjs", "@clerk/clerk-sdk-node", "@clerk/express"],
-    detect: (deps) =>
-      !!deps["@clerk/nextjs"] ||
-      !!deps["@clerk/clerk-sdk-node"] ||
-      !!deps["@clerk/express"],
-    getPackage: (deps) =>
-      deps["@clerk/nextjs"]
-        ? "@clerk/nextjs"
-        : deps["@clerk/express"]
-          ? "@clerk/express"
-          : "@clerk/clerk-sdk-node",
-  },
-  {
-    name: "supabase",
-    packages: ["@supabase/supabase-js", "@supabase/ssr"],
-    detect: (deps) =>
-      !!deps["@supabase/supabase-js"] || !!deps["@supabase/ssr"],
-  },
-  {
-    name: "passport",
-    packages: ["passport"],
-    detect: (deps) => !!deps["passport"],
-  },
-  {
-    name: "lucia",
-    packages: ["lucia"],
-    detect: (deps) => !!deps["lucia"],
-  },
-  {
-    name: "auth0",
-    packages: ["@auth0/nextjs-auth0", "express-openid-connect"],
-    detect: (deps) =>
-      !!deps["@auth0/nextjs-auth0"] || !!deps["express-openid-connect"],
-  },
-  {
-    name: "firebase",
-    packages: ["firebase-admin", "firebase"],
-    detect: (deps) => !!deps["firebase-admin"] || !!deps["firebase"],
-  },
-  {
-    name: "jwt",
-    packages: ["jsonwebtoken"],
-    detect: (deps) => !!deps["jsonwebtoken"],
-  },
-  {
-    name: "express-session",
-    packages: ["express-session"],
-    detect: (deps) => !!deps["express-session"],
-  },
-];
-
-function detectAuth(pkg) {
-  if (!pkg) return { name: null, supported: false };
-
-  const deps = {
-    ...(pkg.dependencies || {}),
-    ...(pkg.devDependencies || {}),
-  };
-
-  for (const lib of AUTH_LIBS) {
-    if (lib.detect(deps)) {
-      const version = lib.getVersion ? lib.getVersion(deps) : null;
-      const pkg2 = lib.getPackage ? lib.getPackage(deps) : lib.packages[0];
-      const supported = [
-        "next-auth",
-        "clerk",
-        "supabase",
-        "passport",
-        "jwt",
-        "express-session",
-      ].includes(lib.name);
-      return { name: lib.name, version, package: pkg2, supported };
-    }
-  }
-
-  return { name: null, supported: false };
-}
-
-// ─── NEXT-AUTH CONFIG LOCATION ───────────────────────────────────────────────
-
-function findNextAuthConfig(cwd) {
-  const candidates = [
-    "pages/api/auth/[...nextauth].js",
-    "pages/api/auth/[...nextauth].ts",
-    "app/api/auth/[...nextauth]/route.js",
-    "app/api/auth/[...nextauth]/route.ts",
-    "src/pages/api/auth/[...nextauth].js",
-    "src/pages/api/auth/[...nextauth].ts",
-    "src/app/api/auth/[...nextauth]/route.js",
-    "src/app/api/auth/[...nextauth]/route.ts",
-    "lib/auth.js",
-    "lib/auth.ts",
-    "lib/authOptions.js",
-    "lib/authOptions.ts",
-    "utils/auth.js",
-    "utils/auth.ts",
-    "auth.js",
-    "auth.ts",
-  ];
-
-  for (const candidate of candidates) {
-    const fullPath = path.join(cwd, candidate);
-    if (fs.existsSync(fullPath)) {
-      return { path: fullPath, relativePath: candidate };
-    }
-  }
-
-  const found = findFileWithContent(cwd, "authOptions", [".js", ".ts"], 3);
-  if (found) {
-    return { path: found, relativePath: path.relative(cwd, found) };
-  }
-
   return null;
 }
 
@@ -770,8 +833,51 @@ function findFileWithContent(dir, searchString, extensions, maxDepth) {
 function detectAppVarName(filePath) {
   try {
     const content = fs.readFileSync(filePath, "utf8");
-    const match = content.match(/(?:const|let|var)\s+(\w+)\s*=\s*express\s*\(/);
-    return match ? match[1] : "app";
+
+    // Pattern 1: const app = express()
+    const match1 = content.match(
+      /(?:const|let|var)\s+(\w+)\s*=\s*express\s*\(/,
+    );
+    if (match1) return match1[1];
+
+    // Pattern 2: const app = require('express')()
+    const match2 = content.match(
+      /(?:const|let|var)\s+(\w+)\s*=\s*require\s*\(\s*['"]express['"]\s*\)\s*\(/,
+    );
+    if (match2) return match2[1];
+
+    // Pattern 3: factory function — createApp(), makeApp() etc.
+    // const app = createApp()
+    const match3 = content.match(
+      /(?:const|let|var)\s+(\w+)\s*=\s*(?:create|make|build|setup)App\s*\(/,
+    );
+    if (match3) return match3[1];
+
+    // Pattern 4: subclass — class MyApp extends express
+    // const app = new MyApp()
+    const subclassNames = [
+      ...content.matchAll(/class\s+(\w+)\s+extends\s+express/g),
+    ].map((m) => m[1]);
+    for (const name of subclassNames) {
+      const subMatch = content.match(
+        new RegExp(`(?:const|let|var)\\s+(\\w+)\\s*=\\s*new\\s+${name}\\s*\\(`),
+      );
+      if (subMatch) return subMatch[1];
+    }
+
+    // Pattern 5: const server = app.listen( → return "app"
+    const match5 = content.match(
+      /(?:const|let|var)\s+(\w+)\s*=\s*(\w+)\.listen\s*\(/,
+    );
+    if (match5) return match5[2];
+
+    // Pattern 6: app.listen( or server.listen(
+    const match6 = content.match(
+      /\b(app|server|router|handler|httpServer)\s*\.listen\s*\(/,
+    );
+    if (match6) return match6[1];
+
+    return "app";
   } catch {
     return "app";
   }
@@ -866,7 +972,6 @@ function detect(cwd) {
   const moduleSystem = detectModuleSystem(backendPkg);
   const isTypeScript = detectTypeScript(backendDir);
   const hasSrc = detectSrcDir(backendDir);
-  const auth = detectAuth(backendPkg);
   const generateTs = shouldGenerateTs(backendDir, isTypeScript);
 
   // ── Find frontend main file ───────────────────────────────────────────────
@@ -895,7 +1000,6 @@ function detect(cwd) {
     isTypeScript,
     generateTs,
     hasSrc,
-    auth,
     packageManager,
     ext: generateTs ? ".ts" : ".js",
     // Frontend info
@@ -908,9 +1012,6 @@ function detect(cwd) {
   if (framework.name === "next") {
     result.next = detectNextRouter(backendDir);
     result.nextVersion = detectNextVersion(backendPkg);
-    if (auth.name === "next-auth") {
-      result.nextAuthConfig = findNextAuthConfig(backendDir);
-    }
   }
 
   if (framework.name === "express") {
@@ -958,6 +1059,54 @@ function detect(cwd) {
   return result;
 }
 
+// ─── CORS DETECTION ───────────────────────────────────────────────────────────
+
+function detectCors(filePath, framework) {
+  if (!filePath || !fs.existsSync(filePath)) return false;
+  const content = fs.readFileSync(filePath, "utf8");
+
+  if (framework === "express") {
+    return (
+      content.includes("cors(") ||
+      content.includes("require('cors')") ||
+      content.includes('require("cors")')
+    );
+  }
+  return false;
+}
+
+// ─── NEXT.JS CORS DETECTION ───────────────────────────────────────────────────
+
+function detectNextJsMiddleware(cwd) {
+  const candidates = [
+    "middleware.ts",
+    "middleware.tsx",
+    "middleware.js",
+    "middleware.jsx",
+    "middleware.mjs",
+    "middleware.mts",
+    "src/middleware.ts",
+    "src/middleware.tsx",
+    "src/middleware.js",
+    "src/middleware.jsx",
+    "src/middleware.mjs",
+    "src/middleware.mts",
+  ];
+
+  for (const candidate of candidates) {
+    const fullPath = path.join(cwd, candidate);
+    if (fs.existsSync(fullPath)) {
+      const content = fs.readFileSync(fullPath, "utf8");
+      if (content.includes("Access-Control-Allow-Origin")) {
+        return { exists: true, hasCors: true, path: fullPath, content };
+      }
+      return { exists: true, hasCors: false, path: fullPath, content };
+    }
+  }
+
+  return { exists: false, hasCors: false, path: null, content: null };
+}
+
 module.exports = {
   detect,
   readPackageJson,
@@ -973,8 +1122,6 @@ module.exports = {
   shouldGenerateTs,
   detectSrcDir,
   detectNextRouter,
-  detectAuth,
-  findNextAuthConfig,
   detectPackageManager,
   detectExistingBotVersion,
   findFileWithContent,
@@ -984,4 +1131,8 @@ module.exports = {
   findCreateServer,
   detectAppVarName,
   detectDotenv,
+  detectCors,
+  detectNextJsMiddleware,
+  parseEntryFromConfigFiles,
+  scoreExpressFile,
 };
