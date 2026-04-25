@@ -1,19 +1,27 @@
 # botversion-sdk-python/botversion-sdk/scanner.py
 import re
+import inspect
+import typing
+from typing import Annotated
 
 
 def scan_routes(app, framework):
-    """
-    Entry point — delegates to the correct scanner based on detected framework.
-    Mirrors JS scanner.scanExpressRoutes() / scanNextJsRoutes()
-    """
+    result = []
     if framework == "fastapi":
-        return scan_fastapi_routes(app)
+        result = scan_fastapi_routes(app)
     elif framework == "flask":
-        return scan_flask_routes(app)
+        result = scan_flask_routes(app)
     elif framework == "django":
-        return scan_django_routes()
-    return []
+        result = scan_django_routes()
+
+    # ADD THIS
+    print(f"\n[DEBUG] ===== SCAN SUMMARY =====")
+    for ep in result:
+        status = "✅" if ep.get("requestBody") else "❌ NULL"
+        print(f"[DEBUG] {status} {ep['method']:6} {ep['path']} → {ep.get('requestBody')}")
+    print(f"[DEBUG] ==========================\n")
+
+    return result
 
 
 # ── FastAPI ──────────────────────────────────────────────────────────────────
@@ -205,7 +213,52 @@ def extract_drf_schema(callback, method):
 
     except Exception as e:
         print(f"[BotVersion SDK] ⚠ DRF schema extraction failed: {e}")
-        return None
+
+    # Strategy 2 — request.data / request.POST pattern
+    try:
+        src = None
+
+        if hasattr(callback, "view_class"):
+            method_fn = getattr(callback.view_class, method.lower(), None)
+            if method_fn:
+                src = inspect.getsource(method_fn)
+        elif hasattr(callback, "cls"):
+            method_fn = getattr(callback.cls, method.lower(), None)
+            if method_fn:
+                src = inspect.getsource(method_fn)
+        else:
+            src = inspect.getsource(callback)
+
+        if src:
+            fields = set()
+
+            # request.data.get('field') or request.data['field']
+            for m in re.finditer(r"request\.data(?:\.get\(|\[)\s*['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", src):
+                fields.add(m.group(1))
+
+            # request.POST.get('field') or request.POST['field']
+            for m in re.finditer(r"request\.POST(?:\.get\(|\[)\s*['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", src):
+                fields.add(m.group(1))
+
+            # data = request.data then data['field'] or data.get('field')
+            var_match = re.search(r"(\w+)\s*=\s*request\.data", src)
+            if var_match:
+                var = var_match.group(1)
+                for m in re.finditer(rf"{var}(?:\.get\(|\[)\s*['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", src):
+                    fields.add(m.group(1))
+
+            # validated_data['field'] or validated_data.get('field')
+            for m in re.finditer(r"validated_data(?:\.get\(|\[)\s*['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", src):
+                fields.add(m.group(1))
+
+            if fields:
+                properties = {f: {"type": "string", "description": f.replace("_", " ").title()} for f in fields}
+                return {"type": "object", "properties": properties}
+
+    except Exception:
+        pass
+
+    return None
 
 
 def _drf_field_to_json_type(field):
@@ -233,6 +286,12 @@ def extract_flask_schema(view_func, method):
     """
     if method.upper() == "GET":
         return None
+    
+    print(f"\n[DEBUG] >>> extract_flask_schema: {method} handler={getattr(view_func, '__name__', '?')}")
+    print(f"[DEBUG] has __apidoc__: {hasattr(view_func, '__apidoc__')}")
+    print(f"[DEBUG] has _schema: {hasattr(view_func, '_schema')}")
+    print(f"[DEBUG] has view_class: {hasattr(view_func, 'view_class')}")
+    print(f"[DEBUG] type hints: {typing.get_type_hints(view_func) if callable(view_func) else 'N/A'}")
 
     try:
         # ── 1. Flask-RESTX / Flask-RESTPlus ──────────────────────────────
@@ -324,6 +383,37 @@ def extract_flask_schema(view_func, method):
 
     except Exception as e:
         print(f"[BotVersion SDK] ⚠ Flask schema extraction failed: {e}")
+
+    # Strategy 5 — plain request.json / request.get_json() / request.form pattern
+    try:
+        src = inspect.getsource(view_func)
+        fields = set()
+
+        # request.json.get('field') or request.json['field']
+        for m in re.finditer(r"request\.json(?:\.get\(|)\s*['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", src):
+            fields.add(m.group(1))
+
+        # request.get_json().get('field') or request.get_json()['field']
+        for m in re.finditer(r"request\.get_json\(\)(?:\.get\(|)\s*['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", src):
+            fields.add(m.group(1))
+
+        # data = request.get_json() then data['field'] or data.get('field')
+        var_match = re.search(r"(\w+)\s*=\s*request\.get_json\(\)", src)
+        if var_match:
+            var = var_match.group(1)
+            for m in re.finditer(rf"{var}(?:\.get\(|\[)\s*['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", src):
+                fields.add(m.group(1))
+
+        # request.form.get('field') or request.form['field']
+        for m in re.finditer(r"request\.form(?:\.get\(|\[)\s*['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", src):
+            fields.add(m.group(1))
+
+        if fields:
+            properties = {f: {"type": "string"} for f in fields}
+            return {"type": "object", "properties": properties}
+
+    except Exception:
+        pass
 
     return None
 
@@ -541,56 +631,101 @@ def generate_description(method, path, handler_name=None):
 
 
 def extract_request_body_schema(route, method):
-    if method == "GET":
+    if method not in ("POST", "PUT", "PATCH"):
         return None
 
+    print(f"\n[DEBUG] >>> extract_request_body_schema called: {method} {getattr(route, 'path', '?')}")
+
     try:
+        # path param names — we must exclude these from body
+        path_param_names = set()
+        if hasattr(route, "dependant") and hasattr(route.dependant, "path_params"):
+            path_param_names = {f.name for f in route.dependant.path_params}
+        print(f"[DEBUG] path_param_names to exclude: {path_param_names}")
+
+        # Strategy 1: route.dependant.body_params
         if hasattr(route, "dependant") and route.dependant.body_params:
+            print(f"[DEBUG] body_params found: {[f.name for f in route.dependant.body_params]}")
             properties = {}
             required = []
 
             for field in route.dependant.body_params:
                 field_name = field.name
 
-                # Try multiple ways to get the annotation
-                annotation = None
+                # Skip path params — they are NOT body fields
+                if field_name in path_param_names:
+                    print(f"[DEBUG] Skipping path param: {field_name}")
+                    continue
 
-                # FastAPI/Pydantic v2
+                annotation = None
                 if hasattr(field, "field_info") and hasattr(field.field_info, "annotation"):
                     annotation = field.field_info.annotation
-
-                # Pydantic v1 style
                 if annotation is None and hasattr(field, "outer_type_"):
                     annotation = field.outer_type_
-
-                # Fallback
                 if annotation is None:
                     annotation = getattr(field, "type_", None)
 
-                print(f"[BotVersion SDK] Field: {field_name}, annotation: {annotation}")
+                print(f"[DEBUG] Field: {field_name}, annotation: {annotation}")
 
                 if annotation and hasattr(annotation, "model_json_schema"):
-                    # Pydantic v2 — inline the model's fields directly
                     schema = annotation.model_json_schema()
                     properties.update(schema.get("properties", {}))
                     required.extend(schema.get("required", []))
                 elif annotation and hasattr(annotation, "schema"):
-                    # Pydantic v1 — inline the model's fields directly
                     schema = annotation.schema()
                     properties.update(schema.get("properties", {}))
                     required.extend(schema.get("required", []))
                 else:
-                    # Scalar param — keep as-is
-                    properties[field_name] = {"type": "string"}
+                    type_map = {"int": "integer", "float": "number", "bool": "boolean", "str": "string"}
+                    python_type = getattr(annotation, "__name__", "string") if annotation else "string"
+                    properties[field_name] = {"type": type_map.get(python_type, "string")}
                     required.append(field_name)
 
             if properties:
                 result = {"type": "object", "properties": properties}
                 if required:
-                    result["required"] = required
+                    result["required"] = list(set(required))
+                return result
+
+        # Strategy 2: inspect type hints on endpoint function directly
+        endpoint_fn = getattr(route, "endpoint", None)
+        if endpoint_fn:
+            hints = typing.get_type_hints(endpoint_fn)
+            sig = inspect.signature(endpoint_fn)
+            properties = {}
+            required = []
+
+            skip = {"request", "response", "background_tasks", "db", "session", "user", "current_user"}
+
+            for param_name, param in sig.parameters.items():
+                if param_name in skip or param_name in path_param_names:
+                    continue
+                annotation = hints.get(param_name)
+                if annotation is None:
+                    continue
+                # Unwrap Annotated[Model, Body(...)] if present
+                origin = getattr(annotation, "__origin__", None)
+                if origin is Annotated:
+                    args = annotation.__args__
+                    if args:
+                        annotation = args[0]
+                if hasattr(annotation, "model_json_schema"):
+                    schema = annotation.model_json_schema()
+                    properties.update(schema.get("properties", {}))
+                    required.extend(schema.get("required", []))
+                elif hasattr(annotation, "schema"):
+                    schema = annotation.schema()
+                    properties.update(schema.get("properties", {}))
+                    required.extend(schema.get("required", []))
+
+            if properties:
+                result = {"type": "object", "properties": properties}
+                if required:
+                    result["required"] = list(set(required))
                 return result
 
     except Exception as e:
-        print(f"[BotVersion SDK] ⚠ Body schema extraction failed: {e}")
+        print(f"[DEBUG] EXCEPTION: {e}")
 
+    print(f"[DEBUG] <<< returning None for {method} {getattr(route, 'path', '?')}")
     return None

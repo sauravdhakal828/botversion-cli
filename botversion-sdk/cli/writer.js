@@ -550,7 +550,6 @@ function writeEnvKey(cwd, key, value, framework) {
 function injectCorsIntoMiddleware(filePath, allowedOrigins) {
   const content = fs.readFileSync(filePath, "utf8");
 
-  // Already has CORS — skip
   if (content.includes("Access-Control-Allow-Origin")) {
     return { success: false, reason: "already_exists" };
   }
@@ -558,32 +557,107 @@ function injectCorsIntoMiddleware(filePath, allowedOrigins) {
   const backup = backupFile(filePath);
   const lines = content.split("\n");
 
-  // Detect actual request parameter name from middleware signature
-  let requestParamName = "request"; // default
+  // ── Step 1: Detect request param name ───────────────────────────────────
+  let requestParamName = "request";
   const sigMatch =
     content.match(/function\s+middleware\s*\(\s*(\w+)/) ||
+    content.match(/export\s+default\s+(?:async\s+)?function\s*\(\s*(\w+)/) ||
     content.match(/middleware\s*=\s*(?:async\s*)?\(\s*(\w+)/) ||
     content.match(/middleware\s*=\s*(?:async\s*)?(\w+)\s*=>/);
   if (sigMatch) requestParamName = sigMatch[1];
 
-  // Detect actual response variable name
-  let responseVarName = "response"; // default
+  // ── Step 2: Detect response variable name ────────────────────────────────
+  let responseVarName = "response";
   const resMatch =
     content.match(/const\s+(\w+)\s*=\s*NextResponse\.next\(\)/) ||
     content.match(/let\s+(\w+)\s*=\s*NextResponse\.next\(\)/) ||
     content.match(/var\s+(\w+)\s*=\s*NextResponse\.next\(\)/);
   if (resMatch) responseVarName = resMatch[1];
 
-  // The CORS headers to inject
-  const corsLines = [
-    ``,
+  // ── Step 2.5: Handle inline return NextResponse.next() ──────────────────
+  // Covers: return NextResponse.next(); with no response variable
+  const hasInlineReturn = /return\s+NextResponse\.next\(\)\s*;/.test(content);
+
+  if (hasInlineReturn && !resMatch) {
+    // Build the headers block using detected variable name "response"
+    const corsVarsBlock = [
+      `  // CORS — auto-added by botversion-sdk`,
+      `  const __bvOrigin = ${requestParamName}.headers.get('origin') || '';`,
+      `  const __bvAllowed = ${JSON.stringify(allowedOrigins)};`,
+      `  const __bvIsAllowed = __bvAllowed.some(o => __bvOrigin.startsWith(o));`,
+      ``,
+    ].join("\n");
+
+    const corsHeadersBlock = [
+      ``,
+      `  // BotVersion CORS headers`,
+      `  if (__bvIsAllowed) {`,
+      `    response.headers.set('Access-Control-Allow-Origin', __bvOrigin);`,
+      `    response.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');`,
+      `    response.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');`,
+      `    response.headers.set('Access-Control-Allow-Credentials', 'true');`,
+      `  }`,
+    ].join("\n");
+
+    // Replace inline return with: variable + cors headers + return
+    const newContent = content.replace(
+      /(\s*)return\s+NextResponse\.next\(\)\s*;/,
+      (match, indent) =>
+        [
+          `${indent}const response = NextResponse.next();`,
+          `${corsHeadersBlock}`,
+          `${indent}return response;`,
+        ].join("\n"),
+    );
+
+    // Now inject corsVarsBlock at top of function body
+    const newLines = newContent.split("\n");
+    let funcBodyLineIndex = -1;
+
+    for (let i = 0; i < newLines.length; i++) {
+      const line = newLines[i];
+      const isMiddlewareLine =
+        /export\s+(default\s+)?(?:async\s+)?function\s+middleware/.test(line) ||
+        /export\s+default\s+(?:async\s+)?function\s*\(/.test(line) ||
+        /export\s+const\s+middleware\s*=/.test(line);
+
+      if (!isMiddlewareLine) continue;
+
+      if (line.includes("{")) {
+        funcBodyLineIndex = i;
+        break;
+      }
+
+      for (let j = i + 1; j < Math.min(i + 5, newLines.length); j++) {
+        if (newLines[j].includes("{")) {
+          funcBodyLineIndex = j;
+          break;
+        }
+      }
+      if (funcBodyLineIndex !== -1) break;
+    }
+
+    if (funcBodyLineIndex !== -1) {
+      newLines.splice(funcBodyLineIndex + 1, 0, ...corsVarsBlock.split("\n"));
+    }
+
+    fs.writeFileSync(filePath, newLines.join("\n"), "utf8");
+    return { success: true, backup };
+  }
+
+  // ── Step 3: Build the two code blocks ────────────────────────────────────
+
+  // Block A — variable declarations (goes at top of function body)
+  const corsVarsBlock = [
     `  // CORS — auto-added by botversion-sdk`,
     `  const __bvOrigin = ${requestParamName}.headers.get('origin') || '';`,
     `  const __bvAllowed = ${JSON.stringify(allowedOrigins)};`,
     `  const __bvIsAllowed = __bvAllowed.some(o => __bvOrigin.startsWith(o));`,
+    ``,
   ].join("\n");
 
-  const corsHeaders = [
+  // Block B — header setters (goes before final return)
+  const corsHeadersBlock = [
     ``,
     `  // BotVersion CORS headers`,
     `  if (__bvIsAllowed) {`,
@@ -594,72 +668,113 @@ function injectCorsIntoMiddleware(filePath, allowedOrigins) {
     `  }`,
   ].join("\n");
 
-  // Strategy 1: find "const response = NextResponse.next()"
-  // and inject CORS checks before it, then inject headers after it
-  let newContent = content;
+  // ── Step 4: Find function body opening brace ─────────────────────────────
+  // Handles all patterns:
+  // export function middleware(req) {
+  // export const middleware = (req) => {
+  // export default function middleware(req) {
+  // export async function middleware(req) {
 
-  const nextResponseLine = lines.findIndex(
-    (l) =>
-      l.includes("NextResponse.next()") ||
-      l.includes("NextResponse.redirect") ||
-      l.includes("NextResponse.rewrite"),
-  );
+  let funcBodyLineIndex = -1;
 
-  if (nextResponseLine !== -1) {
-    // Inject origin check before NextResponse line
-    const before = lines.slice(0, nextResponseLine);
-    const after = lines.slice(nextResponseLine);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
 
-    // Find return statement after NextResponse to inject headers before it
-    let returnLine = -1;
-    for (let i = nextResponseLine; i < lines.length; i++) {
-      if (/^\s*return\s+/.test(lines[i])) {
-        returnLine = i;
+    const isMiddlewareLine =
+      /export\s+(default\s+)?(?:async\s+)?function\s+middleware/.test(line) ||
+      /export\s+default\s+(?:async\s+)?function\s*\(/.test(line) ||
+      /export\s+const\s+middleware\s*=/.test(line);
+
+    if (!isMiddlewareLine) continue;
+
+    // Opening brace might be on same line or next line
+    if (line.includes("{")) {
+      funcBodyLineIndex = i;
+      break;
+    }
+
+    // Look ahead for opening brace
+    for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+      if (lines[j].includes("{")) {
+        funcBodyLineIndex = j;
         break;
       }
     }
 
-    if (returnLine !== -1) {
-      const middle = lines.slice(nextResponseLine, returnLine);
-      const end = lines.slice(returnLine);
+    if (funcBodyLineIndex !== -1) break;
+  }
 
-      newContent = [...before, corsLines, ...middle, corsHeaders, ...end].join(
-        "\n",
-      );
-    } else {
-      // No return found — inject at end of function
-      newContent = [...before, corsLines, ...after, corsHeaders].join("\n");
-    }
-  } else {
-    // Strategy 2: No NextResponse found
-    // Find the export function middleware line and inject at the start of it
-    let funcBodyStart = -1;
-    for (let i = 0; i < lines.length; i++) {
-      if (
-        /export\s+(default\s+)?function\s+middleware/.test(lines[i]) ||
-        /export\s+const\s+middleware/.test(lines[i])
-      ) {
-        // Find opening brace
-        for (let j = i; j < lines.length; j++) {
-          if (lines[j].includes("{")) {
-            funcBodyStart = j;
-            break;
-          }
-        }
-        break;
-      }
-    }
+  if (funcBodyLineIndex === -1) {
+    // Can't find function body — append to end as last resort
+    const newContent =
+      content.trimEnd() + "\n\n" + corsVarsBlock + corsHeadersBlock + "\n";
+    fs.writeFileSync(filePath, newContent, "utf8");
+    return { success: true, backup, method: "append" };
+  }
 
-    if (funcBodyStart !== -1) {
-      const before = lines.slice(0, funcBodyStart + 1);
-      const after = lines.slice(funcBodyStart + 1);
-      newContent = [...before, corsLines, corsHeaders, ...after].join("\n");
-    } else {
-      // Last resort — append to end of file
-      newContent = content.trimEnd() + "\n\n" + corsLines + corsHeaders + "\n";
+  // ── Step 5: Find the LAST return statement before end of function ─────────
+  // We want the final `return response` not any early returns like
+  // `return NextResponse.redirect()`
+
+  let lastReturnLineIndex = -1;
+
+  // Find closing brace of the middleware function first
+  let depth = 0;
+  let funcEndLineIndex = -1;
+
+  for (let i = funcBodyLineIndex; i < lines.length; i++) {
+    for (const ch of lines[i]) {
+      if (ch === "{") depth++;
+      if (ch === "}") depth--;
+    }
+    if (depth === 0) {
+      funcEndLineIndex = i;
+      break;
     }
   }
 
+  // Now find the LAST return inside the function that returns the response var
+  // (not early redirect/rewrite returns)
+  for (let i = funcEndLineIndex; i >= funcBodyLineIndex; i--) {
+    const trimmed = lines[i].trim();
+
+    // Match: return response; or return res;
+    if (new RegExp(`return\\s+${responseVarName}\\s*;`).test(trimmed)) {
+      lastReturnLineIndex = i;
+      break;
+    }
+  }
+
+  // Fallback — just find any last return inside the function
+  if (lastReturnLineIndex === -1) {
+    for (let i = funcEndLineIndex; i >= funcBodyLineIndex; i--) {
+      if (/^\s*return\s+/.test(lines[i])) {
+        lastReturnLineIndex = i;
+        break;
+      }
+    }
+  }
+
+  // ── Step 6: Inject both blocks ────────────────────────────────────────────
+
+  // First inject Block B (headers before return)
+  // Do this first so line indices aren't shifted when we inject Block A
+  let newLines = [...lines];
+
+  if (lastReturnLineIndex !== -1) {
+    newLines.splice(lastReturnLineIndex, 0, ...corsHeadersBlock.split("\n"));
+  } else {
+    // No return found — inject headers before closing brace
+    newLines.splice(funcEndLineIndex, 0, ...corsHeadersBlock.split("\n"));
+  }
+
+  // Now inject Block A (vars at top of function body)
+  // +1 because we want the line AFTER the opening brace
+  // +1 again because we already inserted lines above (only matters if
+  // funcBodyLineIndex > lastReturnLineIndex, which is never true)
+  newLines.splice(funcBodyLineIndex + 1, 0, ...corsVarsBlock.split("\n"));
+
+  const newContent = newLines.join("\n");
   fs.writeFileSync(filePath, newContent, "utf8");
   return { success: true, backup };
 }

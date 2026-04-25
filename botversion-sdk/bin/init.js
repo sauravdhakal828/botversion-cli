@@ -350,7 +350,12 @@ async function setupExpress(detected, args, changes, projectInfo) {
 
   const allowedOrigins = [];
   if (projectInfo.apiUrl) allowedOrigins.push(projectInfo.apiUrl);
-  if (projectInfo.cdnUrl) allowedOrigins.push(projectInfo.cdnUrl);
+  if (projectInfo.cdnUrl) {
+    try {
+      const cdnOrigin = new URL(projectInfo.cdnUrl).origin;
+      if (!allowedOrigins.includes(cdnOrigin)) allowedOrigins.push(cdnOrigin);
+    } catch {}
+  }
   if (allowedOrigins.length === 0) allowedOrigins.push("http://localhost:3000");
 
   if (detector.detectCors(entryPoint, "express")) {
@@ -581,7 +586,12 @@ async function setupNextJs(detected, args, changes, projectInfo) {
 
   const allowedOrigins = [];
   if (projectInfo.apiUrl) allowedOrigins.push(projectInfo.apiUrl);
-  if (projectInfo.cdnUrl) allowedOrigins.push(projectInfo.cdnUrl);
+  if (projectInfo.cdnUrl) {
+    try {
+      const cdnOrigin = new URL(projectInfo.cdnUrl).origin;
+      if (!allowedOrigins.includes(cdnOrigin)) allowedOrigins.push(cdnOrigin);
+    } catch {}
+  }
   if (allowedOrigins.length === 0) allowedOrigins.push("http://localhost:3000");
 
   const middlewareInfo = detector.detectNextJsMiddleware(detected.cwd);

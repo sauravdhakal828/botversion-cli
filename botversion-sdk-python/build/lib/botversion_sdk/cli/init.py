@@ -14,6 +14,7 @@ Mirrors JS bin/init.js
 import os
 import sys
 import argparse
+from urllib.parse import urlparse 
 
 from . import detector
 from . import generator
@@ -149,195 +150,6 @@ def _ensure_sdk_installed(detected, changes, cwd):
 
 
 
-# ── Inject frontend proxy config ──────────────────────────────────────────────
-
-def _inject_frontend_proxy(detected, changes, cwd):
-    """
-    Detects the frontend framework and injects the correct proxy config
-    so requests from the frontend reach the backend correctly.
-    """
-    frontend_dir = detected.get("frontend_dir")
-    frontend_pkg = detected.get("frontend_pkg")
-
-    if not frontend_dir or not frontend_pkg:
-        warn("Could not detect frontend framework — skipping proxy setup.")
-        changes["manual"].append(
-            "Add a proxy to your frontend config to forward /api requests to your backend.\n"
-            "See: https://docs.botversion.com/proxy-setup"
-        )
-        return
-
-    frontend_framework = detector.detect_frontend_framework(frontend_pkg)
-
-    if not frontend_framework:
-        warn("Could not detect frontend framework — skipping proxy setup.")
-        return
-
-    proxy_config = generator.generate_frontend_proxy(frontend_framework)
-
-    if not proxy_config:
-        warn(f"No proxy config available for: {frontend_framework}")
-        return
-
-    proxy_type = proxy_config["type"]
-
-    # ── Vite ──────────────────────────────────────────────────────────────────
-    if proxy_type == "vite":
-        config_path = os.path.join(frontend_dir, "vite.config.js")
-
-        # Also check for vite.config.ts
-        if not os.path.exists(config_path):
-            config_path = os.path.join(frontend_dir, "vite.config.ts")
-
-        if not os.path.exists(config_path):
-            warn("Could not find vite.config.js — skipping proxy setup.")
-            changes["manual"].append(
-                "Add to your vite.config.js:\n\n"
-                "  server: {\n"
-                "    proxy: {\n"
-                "      '/api/botversion/chat': {\n"
-                "        target: 'http://localhost:8000',\n"
-                "        changeOrigin: true,\n"
-                "        rewrite: (path) => path + '/'\n"
-                "      },\n"
-                "      '/api': { target: 'http://localhost:8000', changeOrigin: true }\n"
-                "    }\n"
-                "  }"
-            )
-            return
-
-        result = writer.inject_vite_proxy(config_path, proxy_config["code"])
-
-        if result["success"]:
-            success(f"Added proxy config to {os.path.relpath(config_path, cwd)}")
-            changes["modified"].append(os.path.relpath(config_path, cwd))
-            if result.get("backup"):
-                changes["backups"].append(result["backup"])
-        elif result["reason"] == "already_exists":
-            warn("Proxy config already exists — skipping.")
-        elif result["reason"] == "manual_required":
-            warn("Could not auto-inject proxy — add manually:")
-            changes["manual"].append(
-                "Add to your vite.config.js server block:\n\n"
-                "  proxy: {\n"
-                "    '/api/botversion/chat': {\n"
-                "      target: 'http://localhost:8000',\n"
-                "      changeOrigin: true,\n"
-                "      rewrite: (path) => path + '/'\n"
-                "    },\n"
-                "    '/api': { target: 'http://localhost:8000', changeOrigin: true }\n"
-                "  }"
-            )
-
-    # ── CRA ───────────────────────────────────────────────────────────────────
-    elif proxy_type == "cra":
-        package_json_path = os.path.join(frontend_dir, "package.json")
-
-        if not os.path.exists(package_json_path):
-            warn("Could not find package.json — skipping proxy setup.")
-            return
-
-        result = writer.inject_cra_proxy(package_json_path, proxy_config["code"])
-
-        if result["success"]:
-            success(f"Added proxy to {os.path.relpath(package_json_path, cwd)}")
-            changes["modified"].append(os.path.relpath(package_json_path, cwd))
-            if result.get("backup"):
-                changes["backups"].append(result["backup"])
-        elif result["reason"] == "already_exists":
-            warn("Proxy already exists in package.json — skipping.")
-
-    # ── Next.js ───────────────────────────────────────────────────────────────
-    elif proxy_type == "next":
-        config_path = os.path.join(frontend_dir, "next.config.js")
-
-        if not os.path.exists(config_path):
-            config_path = os.path.join(frontend_dir, "next.config.mjs")
-
-        if not os.path.exists(config_path):
-            warn("Could not find next.config.js — skipping proxy setup.")
-            changes["manual"].append(
-                "Add to your next.config.js:\n\n"
-                "  async rewrites() {\n"
-                "    return [\n"
-                "      { source: '/api/botversion/chat', destination: 'http://localhost:8000/api/botversion/chat/' },\n"
-                "      { source: '/api/:path*', destination: 'http://localhost:8000/api/:path*' },\n"
-                "    ]\n"
-                "  },"
-            )
-            return
-
-        result = writer.inject_next_proxy(config_path, proxy_config["code"])
-
-        if result["success"]:
-            success(f"Added rewrites to {os.path.relpath(config_path, cwd)}")
-            changes["modified"].append(os.path.relpath(config_path, cwd))
-            if result.get("backup"):
-                changes["backups"].append(result["backup"])
-        elif result["reason"] == "already_exists":
-            warn("Rewrites already exist — skipping.")
-        elif result["reason"] == "manual_required":
-            warn("Could not auto-inject rewrites — add manually.")
-            changes["manual"].append(
-                "Add to your next.config.js:\n\n"
-                "  async rewrites() {\n"
-                "    return [\n"
-                "      { source: '/api/botversion/chat', destination: 'http://localhost:8000/api/botversion/chat/' },\n"
-                "    ]\n"
-                "  },"
-            )
-
-    # ── Angular ───────────────────────────────────────────────────────────────
-    elif proxy_type == "angular":
-        result = writer.inject_angular_proxy(frontend_dir, proxy_config["code"])
-
-        if result["success"]:
-            success("Created proxy.conf.json and updated angular.json")
-            changes["created"].append("proxy.conf.json")
-            if result.get("backup"):
-                changes["backups"].append(result["backup"])
-            if result.get("manual"):
-                changes["manual"].append(result["manual"])
-        elif result["reason"] == "already_exists":
-            warn("Angular proxy already configured — skipping.")
-
-    # ── Vue CLI ───────────────────────────────────────────────────────────────
-    elif proxy_type == "vue-cli":
-        config_path = os.path.join(frontend_dir, "vue.config.js")
-
-        if not os.path.exists(config_path):
-            warn("Could not find vue.config.js — skipping proxy setup.")
-            changes["manual"].append(
-                "Add to your vue.config.js:\n\n"
-                "  devServer: {\n"
-                "    proxy: {\n"
-                "      '/api/botversion/chat': {\n"
-                "        target: 'http://localhost:8000',\n"
-                "        changeOrigin: true,\n"
-                "      },\n"
-                "    },\n"
-                "  },"
-            )
-            return
-
-        result = writer.inject_vue_cli_proxy(config_path, proxy_config["code"])
-
-        if result["success"]:
-            success(f"Added proxy to {os.path.relpath(config_path, cwd)}")
-            changes["modified"].append(os.path.relpath(config_path, cwd))
-            if result.get("backup"):
-                changes["backups"].append(result["backup"])
-        elif result["reason"] == "already_exists":
-            warn("Proxy already exists — skipping.")
-        elif result["reason"] == "manual_required":
-            warn("Could not auto-inject proxy — add manually.")
-            changes["manual"].append(
-                "Add devServer proxy block to your vue.config.js manually.\n"
-                "See: https://docs.botversion.com/proxy-setup"
-            )
-
-
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -413,26 +225,6 @@ def main():
     success(f"Framework: {framework['name']}")
     info(f"Package manager: {detected.get('virtualenv', 'pip')}")
 
-    # ── Auth detection ────────────────────────────────────────────────────────
-    step("Detecting auth library...")
-
-    auth = detected.get("auth", {})
-
-    if not auth.get("name"):
-        warn("No auth library detected automatically.")
-        auth = prompts.prompt_auth_library(framework["name"])
-        detected["auth"] = auth
-    elif not auth.get("supported"):
-        warn(f"Detected auth: {auth['name']} (not yet supported for auto-setup)")
-        warn("Will set up without user context — you can add it manually later.")
-        proceed = prompts.confirm("Continue without auth?", default_yes=True)
-        if not proceed:
-            sys.exit(0)
-        auth = {"name": auth["name"], "supported": False}
-        detected["auth"] = auth
-    else:
-        success(f"Auth: {auth['name']}")
-
     # ── Route to framework setup ──────────────────────────────────────────────
     fw_name = framework["name"]
 
@@ -442,6 +234,93 @@ def main():
         setup_flask(detected, args, changes, cwd)
     elif fw_name == "django":
         setup_django(detected, args, changes, cwd)
+
+    # ── Also check for a separate Python backend folder ───────────────────
+    # Only scan if root backend_root is same as cwd (meaning no separate
+    # backend was found during detection) to avoid double setup
+    should_scan_for_backend = (
+        os.path.abspath(detected.get("backend_root", cwd)) == os.path.abspath(cwd)
+    )
+
+    step("Checking for separate Python backend...")
+    backend_dirs = ["backend", "api", "server", "services"]
+    python_backend_found = False
+
+    if not should_scan_for_backend:
+        info("Backend already detected — skipping separate backend scan.")
+    else:
+        for dir_name in backend_dirs:
+            backend_path = os.path.join(cwd, dir_name)
+            if not os.path.isdir(backend_path):
+                continue
+
+            # Skip if this is already the detected backend
+            if os.path.abspath(backend_path) == os.path.abspath(detected.get("backend_root", "")):
+                continue
+
+            # Check if this folder has Python framework files
+            backend_packages = detector.read_requirements(backend_path)
+            backend_framework = detector.detect_framework(backend_packages)
+
+            if not backend_framework["name"]:
+                has_python_backend = False
+                try:
+                    for file in os.listdir(backend_path):
+                        if not file.endswith(".py"):
+                            continue
+                        try:
+                            with open(os.path.join(backend_path, file), "r", encoding="utf-8") as f:
+                                content = f.read()
+                            if any(sig in content for sig in [
+                                "Flask(", "FastAPI(", "get_wsgi_application",
+                                "app.run(", "uvicorn.run(",
+                                "(Flask)",
+                                "create_app",
+                                "make_app",
+                                "build_app",
+                                "setup_app",
+                                "init_app",
+                            ]):
+                                has_python_backend = True
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+                if not has_python_backend:
+                    continue
+
+                backend_detected = detector.detect(backend_path)
+                backend_framework = backend_detected.get("framework", {})
+
+                if not backend_framework.get("name"):
+                    continue
+
+            else:
+                backend_detected = detector.detect(backend_path)
+
+            if not backend_framework.get("supported"):
+                warn(f"Found {backend_framework.get('name')} in \"{dir_name}/\" — not yet supported.")
+                continue
+
+            python_backend_found = True
+            warn(f"Found Python backend ({backend_framework['name']}) in \"{dir_name}/\" folder.")
+
+            if backend_detected.get("entry_point"):
+                success(f"Backend entry point: {os.path.relpath(backend_detected['entry_point'], cwd)}")
+
+            if backend_framework["name"] == "fastapi":
+                setup_fastapi(backend_detected, args, changes, cwd)
+            elif backend_framework["name"] == "flask":
+                setup_flask(backend_detected, args, changes, cwd)
+            elif backend_framework["name"] == "django":
+                setup_django(backend_detected, args, changes, cwd)
+
+            break
+
+        if not python_backend_found and fw_name not in ("fastapi", "flask", "django"):
+            info("No separate Python backend found — skipping.")
 
     # ── Write API key to .env ─────────────────────────────────────────────────
     backend_root = detected.get("backend_root", cwd)
@@ -526,6 +405,10 @@ def setup_fastapi(detected, args, changes, cwd):
 
     success(f"Entry point: {os.path.relpath(entry_point, cwd)}")
 
+    # ── Inject CORS ───────────────────────────────────────────────────────────────
+    step("Configuring CORS...")
+    _inject_cors_fastapi_flask(detected, changes, cwd, "fastapi")
+
     generated = generator.generate_fastapi_init(detected, args.key)
 
     # Inject init block before uvicorn.run()
@@ -535,7 +418,6 @@ def setup_fastapi(detected, args, changes, cwd):
 
     if run_call:
         result = writer.inject_before_run(entry_point, full_code, "fastapi")
-
         if result["success"]:
             success(f"Injected botversion_sdk.init() before uvicorn.run()")
             changes["modified"].append(os.path.relpath(entry_point, cwd))
@@ -544,12 +426,10 @@ def setup_fastapi(detected, args, changes, cwd):
         elif result["reason"] == "already_exists":
             warn("BotVersion already found — skipping injection.")
         else:
-            _handle_missing_run_call(entry_point, generated["init_block"], generated.get("imports", ""), "fastapi", changes, cwd, detected)
-
+             _handle_missing_run_call(entry_point, generated["init_block"], generated.get("imports", ""), "fastapi", changes, cwd, detected)
     else:
-        # No uvicorn.run() found — common in Docker/CLI projects, just append
-        full_block = (generated.get("imports", "") + "\n\n" + generated["init_block"])
-        result = writer.append_to_file(entry_point, full_block)
+        # No uvicorn.run() — safe to just append
+        result = writer.append_to_file(entry_point, full_code)
         if result["success"]:
             success("Injected botversion_sdk.init() into main.py")
             changes["modified"].append(os.path.relpath(entry_point, cwd))
@@ -558,10 +438,6 @@ def setup_fastapi(detected, args, changes, cwd):
 
     # ── Inject script tag into frontend file ──────────────────────────────────
     _inject_frontend_script_tag(detected, changes, cwd, args.force)
-    _inject_frontend_user_context(detected, changes, cwd)
-
-    step("Configuring frontend proxy...")
-    _inject_frontend_proxy(detected, changes, cwd)
 
     # ── Ensure SDK is installed in the correct environment ────────────────────
     step("Installing SDK into backend environment...")
@@ -601,6 +477,10 @@ def setup_flask(detected, args, changes, cwd):
 
     success(f"Entry point: {os.path.relpath(entry_point, cwd)}")
 
+    # ── Inject CORS ───────────────────────────────────────────────────────────────
+    step("Configuring CORS...")
+    _inject_cors_fastapi_flask(detected, changes, cwd, "flask")
+
     generated = generator.generate_flask_init(detected, args.key)
 
     # Inject init block before app.run()
@@ -610,7 +490,6 @@ def setup_flask(detected, args, changes, cwd):
 
     if run_call:
         result = writer.inject_before_run(entry_point, full_code, "flask")
-
         if result["success"]:
             success("Injected botversion_sdk.init() before app.run()")
             changes["modified"].append(os.path.relpath(entry_point, cwd))
@@ -620,10 +499,9 @@ def setup_flask(detected, args, changes, cwd):
             warn("BotVersion already found — skipping injection.")
         else:
             _handle_missing_run_call(entry_point, generated["init_block"], generated.get("imports", ""), "flask", changes, cwd, detected)
-
     else:
-        full_block = (generated.get("imports", "") + "\n\n" + generated["init_block"])
-        result = writer.append_to_file(entry_point, full_block)
+        # No app.run() — safe to just append
+        result = writer.append_to_file(entry_point, full_code)
         if result["success"]:
             success("Injected botversion_sdk.init() into app.py")
             changes["modified"].append(os.path.relpath(entry_point, cwd))
@@ -632,10 +510,6 @@ def setup_flask(detected, args, changes, cwd):
 
     # ── Inject script tag into frontend file ──────────────────────────────────
     _inject_frontend_script_tag(detected, changes, cwd, args.force)
-    _inject_frontend_user_context(detected, changes, cwd)
-
-    step("Configuring frontend proxy...")
-    _inject_frontend_proxy(detected, changes, cwd)
 
     # ── Ensure SDK is installed in the correct environment ────────────────────
     step("Installing SDK into backend environment...")
@@ -699,77 +573,8 @@ def setup_django(detected, args, changes, cwd):
     step("Configuring CORS...")
     _inject_cors_settings(detected, changes, cwd)
 
-    # 4. Find and update urls.py
-    step("Adding chat URL to urls.py...")
-
-    urls_candidates = [
-        "urls.py",
-        "config/urls.py",
-        "core/urls.py",
-        "app/urls.py",
-        "src/urls.py",
-        "backend/urls.py",
-    ]
-
-    urls_path = None
-    for candidate in urls_candidates:
-        for base in list(dict.fromkeys([cwd, backend_root])):
-            full_path = os.path.join(base, candidate)
-            if os.path.exists(full_path):
-                try:
-                    with open(full_path, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    if "urlpatterns" in content:
-                        urls_path = full_path
-                        break
-                except Exception:
-                    continue
-        if urls_path:
-            break
-
-    if not urls_path:
-        urls_path = detector.find_file_with_content(cwd, "urlpatterns", [".py"], max_depth=3)
-
-    if not urls_path:
-        warn("Could not find your main urls.py automatically.")
-        manual_path = prompts.prompt_django_urls_path()
-        candidates = [
-            os.path.join(cwd, manual_path),
-            os.path.join(backend_root, manual_path),
-        ]
-        candidates = list(dict.fromkeys(candidates))
-        urls_path = next((c for c in candidates if os.path.exists(c)), candidates[0])
-
-    if urls_path and os.path.exists(urls_path):
-        url_code = generator.generate_django_chat_url()
-        url_result = writer.inject_django_url(
-            urls_path,
-            url_code["url_code"],
-            extra_import=url_code["import"],
-        )
-
-        if url_result["success"]:
-            success(f"Added BotVersion chat URL to {os.path.relpath(urls_path, cwd)}")
-            changes["modified"].append(os.path.relpath(urls_path, cwd))
-        elif url_result["reason"] == "already_exists":
-            warn("BotVersion URL already found in urls.py — skipping.")
-    else:
-        warn("Could not find urls.py — add the chat URL manually:")
-        changes["manual"].append(
-            "Add to your main urls.py:\n\n"
-            "    import botversion_sdk\n"
-            "    from django.urls import path\n\n"
-            "    urlpatterns += [\n"
-            "        path('api/botversion/chat/', botversion_sdk.chat_handler('django')),\n"
-            "    ]"
-        )
-
     # ── Inject script tag into frontend file ──────────────────────────────────
     _inject_frontend_script_tag(detected, changes, cwd, args.force)
-    _inject_frontend_user_context(detected, changes, cwd)
-
-    step("Configuring frontend proxy...")
-    _inject_frontend_proxy(detected, changes, cwd)
 
     # ── Ensure SDK is installed in the correct environment ────────────────────
     step("Installing SDK into backend environment...")
@@ -779,16 +584,25 @@ def setup_django(detected, args, changes, cwd):
 # ── Inject CORS settings into Django settings.py ─────────────────────────────
 
 def _inject_cors_settings(detected, changes, cwd):
-    """
-    Automatically configures django-cors-headers in settings.py.
-    So users don't need to manually set up CORS.
-    """
+    project_info = detected.get("project_info", {})
+
+    allowed_origins = []
+    for key in ("cdn_url", "api_url"):
+        url = project_info.get(key)
+        if url:
+            parsed = urlparse(url)
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            if origin not in allowed_origins:
+                allowed_origins.append(origin)
+
+    if not allowed_origins:
+        allowed_origins = ["http://localhost:3000"]
+
     settings_info = detected.get("django_settings")
     if not settings_info:
         warn("Could not find settings.py — skipping CORS setup.")
         changes["manual"].append(
-            "Add CORS configuration to your settings.py manually:\n\n"
-            "    pip install django-cors-headers\n\n"
+            "Add to your settings.py:\n\n"
             "    INSTALLED_APPS += ['corsheaders']\n\n"
             "    MIDDLEWARE = ['corsheaders.middleware.CorsMiddleware'] + MIDDLEWARE\n\n"
             "    CORS_ALLOW_ALL_ORIGINS = True"
@@ -826,9 +640,9 @@ def _inject_cors_settings(detected, changes, cwd):
     try:
         with open(settings_path, "r", encoding="utf-8") as f:
             current_content = f.read()
-        if "CORS_ALLOW_ALL_ORIGINS" not in current_content:
+        if "CORS_ALLOWED_ORIGINS" not in current_content and "CORS_ALLOW_ALL_ORIGINS" not in current_content:
             with open(settings_path, "a", encoding="utf-8") as f:
-                f.write("\n# BotVersion — allow all origins for AI agent widget\nCORS_ALLOW_ALL_ORIGINS = True\n")
+                f.write(generator.generate_django_cors_settings(allowed_origins))
     except Exception:
         pass
 
@@ -843,6 +657,102 @@ def _inject_cors_settings(detected, changes, cwd):
             "    MIDDLEWARE = ['corsheaders.middleware.CorsMiddleware'] + MIDDLEWARE\n\n"
             "    CORS_ALLOW_ALL_ORIGINS = True"
         )
+
+
+
+def _inject_cors_fastapi_flask(detected, changes, cwd, framework):
+    entry_point = detected.get("entry_point")
+    app_var = detected.get("app_var_name", "app")
+    project_info = detected.get("project_info", {})
+    
+    allowed_origins = []
+    for key in ("cdn_url", "api_url"):
+        url = project_info.get(key)
+        if url:
+            parsed = urlparse(url)
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            if origin not in allowed_origins:
+                allowed_origins.append(origin)
+
+    if not allowed_origins:
+        allowed_origins = ["http://localhost:3000"]
+
+    if not entry_point or not os.path.exists(entry_point):
+        warn("Could not find entry point — skipping CORS setup.")
+        return
+
+    # Check if CORS already exists
+    if detector.detect_cors(entry_point, framework):
+        info("CORS already configured — skipping.")
+        return
+
+    # Generate CORS code
+    if framework == "fastapi":
+        cors_code = generator.generate_fastapi_cors(app_var, allowed_origins)
+        package = None  # FastAPI has CORSMiddleware built in
+    elif framework == "flask":
+        cors_code = generator.generate_flask_cors(app_var, allowed_origins)
+        package = "flask-cors"  # Need to install flask-cors
+    else:
+        return
+
+    # Install package if needed (Flask only)
+    if package:
+        import subprocess
+        pip_info = detected.get("pip_info")
+        if pip_info:
+            pip_cmd = pip_info["pip"]
+            try:
+                install_cmd = pip_cmd + ["install", package]
+                result = subprocess.run(
+                    install_cmd,
+                    capture_output=True,
+                    text=True,
+                    cwd=detected.get("backend_root", cwd),
+                )
+                if result.returncode == 0:
+                    success(f"{package} installed successfully")
+                else:
+                    warn(f"Could not install {package} — add manually:")
+                    changes["manual"].append(
+                        f"Install {package}:\n\n    pip install {package}"
+                    )
+            except Exception as e:
+                warn(f"Could not install {package}: {e}")
+                changes["manual"].append(
+                    f"Install {package}:\n\n    pip install {package}"
+                )
+
+    # Inject CORS code
+    result = writer.inject_cors(entry_point, cors_code, framework)
+
+    if result["success"]:
+        success(f"Added CORS configuration to {os.path.relpath(entry_point, cwd)}")
+        changes["modified"].append(os.path.relpath(entry_point, cwd))
+        if result.get("backup"):
+            changes["backups"].append(result["backup"])
+    elif result["reason"] == "already_exists":
+        info("CORS already configured — skipping.")
+    else:
+        warn("Could not auto-configure CORS — add manually:")
+        if framework == "fastapi":
+            changes["manual"].append(
+                "Add to your FastAPI entry file:\n\n"
+                "    from fastapi.middleware.cors import CORSMiddleware\n\n"
+                f"    {app_var}.add_middleware(\n"
+                "        CORSMiddleware,\n"
+                "        allow_origins=['*'],\n"
+                "        allow_credentials=True,\n"
+                "        allow_methods=['*'],\n"
+                "        allow_headers=['*'],\n"
+                "    )"
+            )
+        elif framework == "flask":
+            changes["manual"].append(
+                "Add to your Flask entry file:\n\n"
+                "    from flask_cors import CORS\n\n"
+                f"    CORS({app_var})"
+            )
 
 
 # ── Inject frontend script tag ────────────────────────────────────────────────
@@ -889,74 +799,6 @@ def _inject_frontend_script_tag(detected, changes, cwd, force):
         warn("Could not find frontend HTML file automatically.")
         changes["manual"].append(
             f"Add to your frontend HTML before </body>:\n\n{script_tag}"
-        )
-
-
-# ── Inject frontend user context ──────────────────────────────────────────────
-
-def _inject_frontend_user_context(detected, changes, cwd):
-    """
-    Injects the userContext init code into the frontend HTML file.
-    Called right after _inject_frontend_script_tag in every framework setup.
-    """
-    frontend_main_file = detected.get("frontend_main_file")
-    auth = detected.get("auth", {})
-
-    if not frontend_main_file:
-        warn("Could not find frontend file — skipping user context injection.")
-        changes["manual"].append(
-            "Add this to your frontend HTML after the BotVersion script tag:\n\n"
-            "<script>\n"
-            "  // Replace YOUR_USER_OBJECT with your logged-in user\n"
-            "  if (window.cw) { window.cw('init', { userContext: YOUR_USER_OBJECT || {} }); }\n"
-            "</script>"
-        )
-        return
-
-    # Get the correct JS snippet for their auth library
-    frontend_framework = detector.detect_frontend_framework(
-        detected.get("frontend_pkg") or {}
-    )
-    user_context_result = generator.generate_frontend_user_context(auth, frontend_framework)
-
-    js_code = user_context_result.get("code", "")
-    is_manual = user_context_result.get("manual", False)
-    note = user_context_result.get("note", "")
-
-    if not js_code:
-        return
-
-    # Inject into the HTML file right after the botversion-loader script tag
-    result = writer.inject_user_context(
-        frontend_main_file["file"],
-        js_code,
-    )
-
-    rel_path = os.path.relpath(frontend_main_file["file"], cwd)
-
-    if result["success"]:
-        success(f"Injected user context into {rel_path}")
-        changes["modified"].append(rel_path)
-        if result.get("backup"):
-            changes["backups"].append(result["backup"])
-        # If it needed a manual step (e.g. /api/me endpoint), tell the developer
-        if is_manual and note:
-            warn(f"One manual step needed: {note}")
-            changes["manual"].append(note)
-    elif result["reason"] == "already_exists":
-        warn("User context already injected — skipping.")
-    elif result["reason"] == "no_loader_script":
-        # Script tag wasn't injected yet — tell them to add it manually
-        warn("Could not inject user context — BotVersion script tag not found.")
-        changes["manual"].append(
-            f"Add this to your frontend HTML after the BotVersion script tag:\n\n"
-            f"<script>\n  {js_code}\n</script>"
-        )
-    else:
-        warn("Could not auto-inject user context. Add this manually:")
-        changes["manual"].append(
-            f"Add this to your frontend HTML after the BotVersion script tag:\n\n"
-            f"<script>\n  {js_code}\n</script>"
         )
 
 

@@ -9,7 +9,6 @@ from .interceptor import (
     attach_fastapi_interceptor,
     attach_flask_interceptor,
     attach_django_interceptor,
-    extract_default_context,
 )
 
 _initialized = False
@@ -33,26 +32,8 @@ def init(app=None, api_key=None, **options):
 
         # Django — no app object needed:
         botversion_sdk.init(api_key="YOUR_KEY")
-
-        # With all options:
-        botversion_sdk.init(
-            app,
-            api_key="YOUR_KEY",
-            platform_url="http://localhost:3000",
-            debug=True,
-            exclude=["/health", "/ping"],
-            api_prefix="/api",
-            get_user_context=lambda req: {"userId": req.user.id},
-        )
     """
     global _initialized, _client, _options, _app
-
-    print("=== INIT CALLED ===")
-    print(f"app type: {type(app)}")
-    print(f"app is framework instance: {app is not None}")
-    print(f"api_key provided: {bool(api_key)}")
-    print(f"options: {options}")
-    print("===================")
 
     if not api_key:
         print("[BotVersion SDK] ❌ api_key is required.")
@@ -77,23 +58,15 @@ def init(app=None, api_key=None, **options):
 
     debug = options.get("debug", False)
 
-    if debug:
-        print("[BotVersion SDK] Initializing...")
-        if app is not None:
-            print(f"[BotVersion SDK] Mode: {_detect_framework(app) or 'unknown'}")
-        else:
-            print("[BotVersion SDK] Mode: Django (no app object)")
-
-    # ── Auto-detect framework FIRST ──────────────────────────────────────────
+    # ── Auto-detect framework ─────────────────────────────────────────────────
     framework = _detect_framework(app)
 
     if not framework:
         print("[BotVersion SDK] ❌ Could not detect framework.")
         print("[BotVersion SDK] ❌ Make sure FastAPI, Flask, or Django is installed.")
-        _initialized = False  # Reset so user can try again after fixing
+        _initialized = False
         return
 
-    # Only create client if framework is valid
     _client = BotVersionClient({
         "api_key": api_key,
         "platform_url": options.get("platform_url", "http://localhost:3000"),
@@ -113,7 +86,6 @@ def init(app=None, api_key=None, **options):
         "exclude": options.get("exclude", []),
         "api_prefix": options.get("api_prefix", None),
         "debug": debug,
-        "get_user_context": options.get("get_user_context", None),
     }
 
     # ── Attach runtime interceptor ───────────────────────────────────────────
@@ -125,8 +97,6 @@ def init(app=None, api_key=None, **options):
         attach_django_interceptor(_client, interceptor_options)
     else:
         print(f"[BotVersion SDK] ❌ Unsupported framework: {framework}")
-        print("[BotVersion SDK] ❌ Currently supports FastAPI, Flask, and Django only.")
-        print("[BotVersion SDK] ❌ Visit https://docs.botversion.com for supported frameworks.")
         return
 
     if debug:
@@ -155,18 +125,11 @@ def init(app=None, api_key=None, **options):
                 endpoints = scan_routes(None, "django")
                 print(f"[BotVersion SDK] Found {len(endpoints)} Django routes")
 
-                if debug:
-                    import json
-                    print(f"[BotVersion SDK] Endpoints: {json.dumps(endpoints, indent=2)}")
-
                 if len(endpoints) == 0:
                     print("[BotVersion SDK] ⚠ No Django routes found.")
                     print("[BotVersion SDK] ⚠ Make sure botversion_sdk.init() is called AFTER Django is fully loaded.")
-
             else:
                 print("[BotVersion SDK] ❌ No routes to scan.")
-                print("[BotVersion SDK] ❌ For FastAPI/Flask: pass your app — botversion_sdk.init(app, api_key='...')")
-                print("[BotVersion SDK] ❌ For Django: botversion_sdk.init(api_key='...')")
                 return
 
             if endpoints:
@@ -201,238 +164,16 @@ def register_endpoint(endpoint):
     return _client.register_endpoints([endpoint])
 
 
-# ── Chat handler ─────────────────────────────────────────────────────────────
-
-def chat_handler(framework="fastapi"):
-    """
-    Returns a ready-made chat route handler for the given framework.
-
-    FastAPI:
-        @app.post("/api/chat")
-        async def chat_route(request: Request):
-            return await botversion_sdk.chat_handler("fastapi")(request)
-
-    Flask:
-        @app.route("/api/chat", methods=["POST"])
-        def chat_route():
-            return botversion_sdk.chat_handler("flask")(request)
-
-    Django:
-        # urls.py
-        path("api/chat/", botversion_sdk.chat_handler("django")),
-    """
-    if framework == "fastapi":
-        async def _fastapi_handler(request):
-            return await _handle_chat_fastapi(request)
-        return _fastapi_handler
-
-    elif framework == "flask":
-        def _flask_handler(request):
-            return _handle_chat_flask(request)
-        return _flask_handler
-
-    elif framework == "django":
-        def _django_handler(request):
-            return _handle_chat_django(request)
-        return _django_handler
-
-    else:
-        raise ValueError(f"[BotVersion SDK] Unsupported framework: {framework}")
-
-
-async def _handle_chat_fastapi(request):
-    import json
-    from starlette.responses import JSONResponse
-
-    if not _client:
-        return JSONResponse({"error": "BotVersion SDK not initialized."}, status_code=500)
-
-    try:
-        body = await request.body()
-        data = json.loads(body) if body else {}
-    except Exception:
-        data = {}
-
-    # Extract auth headers from the original browser request
-    original_headers = {}
-    auth = request.headers.get("authorization") or request.headers.get("Authorization")
-    cookie = request.headers.get("cookie") or request.headers.get("Cookie")
-    if auth:
-        original_headers["Authorization"] = auth
-    if cookie:
-        original_headers["Cookie"] = cookie
-
-    print(f"[DEBUG-1] raw userContext from body: {data.get('userContext')}")
-    print(f"[DEBUG-2] type: {type(data.get('userContext'))}")
-    print(f"[DEBUG-3] bool: {bool(data.get('userContext'))}")
-
-    user_context = data.get("userContext") or {}
-    print(f"[DEBUG-4] after 'or {{}}': {user_context}")
-    print(f"[DEBUG-5] not user_context: {not user_context}")
-
-    if not user_context:
-        print(f"[DEBUG-6] ENTERED if block — calling extract/get_user_context")
-        get_user_context = _options.get("get_user_context", None)
-        if get_user_context:
-            from .interceptor import _process_user_context
-            user_context = _process_user_context(get_user_context(request))
-            print(f"[DEBUG-7] after _process_user_context: {user_context}")
-        else:
-            user_context = extract_default_context(request, "fastapi")
-            print(f"[DEBUG-8] after extract_default_context: {user_context}")
-    else:
-        print(f"[DEBUG-6] SKIPPED if block — userContext truthy: {user_context}")
-
-    try:
-        response = await _client.agent_chat_async({
-            "message": data.get("message", ""),
-            "conversation_history": data.get("conversationHistory", []),
-            "page_context": data.get("pageContext", {}),
-            "user_context": user_context,
-            "chatbot_id": data.get("chatbotId"),
-            "public_key": data.get("publicKey"),
-        })
-
-        print(f"[DEBUG-RESPONSE] action: {response.get('action')}")
-        print(f"[DEBUG-RESPONSE] keys: {list(response.keys())}")
-        print(f"[DEBUG-RESPONSE] full response: {response}")
-
-        return JSONResponse(response, status_code=200)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        print(f"[BotVersion SDK] chat error: {e}")
-        return JSONResponse({"error": "Agent error"}, status_code=500)
-
-
-def _handle_chat_flask(request):
-    from flask import jsonify
-
-    data = request.get_json(silent=True) or {}
-
-    raw_user_context = data.get("userContext")
-    print(f"[DEBUG-1] raw userContext from body: {raw_user_context}")
-    print(f"[DEBUG-2] type: {type(raw_user_context)}")
-    print(f"[DEBUG-3] bool(raw_user_context): {bool(raw_user_context)}")
-
-    user_context = data.get("userContext") or {}
-    print(f"[DEBUG-4] after 'or {{}}': {user_context}")
-    print(f"[DEBUG-5] not user_context: {not user_context}")
-
-    if not user_context:
-        print(f"[DEBUG-6] ENTERED the if block — userContext was falsy")
-        get_user_context = _options.get("get_user_context", None)
-        if get_user_context:
-            from .interceptor import _process_user_context
-            user_context = _process_user_context(get_user_context(request))
-            print(f"[DEBUG-7] after _process_user_context: {user_context}")
-        else:
-            user_context = extract_default_context(request, "flask")
-            print(f"[DEBUG-8] after extract_default_context: {user_context}")
-    else:
-        print(f"[DEBUG-6] SKIPPED the if block — userContext was truthy, value: {user_context}")
-
-    print(f"[BotVersion] userContext being sent: {user_context}")
-
-    # Extract auth headers from the original browser request
-    original_headers = {}
-    auth = request.headers.get("Authorization")
-    cookie = request.headers.get("Cookie")
-    if auth:
-        original_headers["Authorization"] = auth
-    if cookie:
-        original_headers["Cookie"] = cookie
-
-    try:
-        response = _client.agent_chat({
-            "message": data.get("message", ""),
-            "conversation_history": data.get("conversationHistory", []),
-            "page_context": data.get("pageContext", {}),
-            "user_context": user_context,
-            "chatbot_id": data.get("chatbotId"),
-            "public_key": data.get("publicKey"),
-        })
-
-        return jsonify(response), 200
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        print(f"[BotVersion SDK] chat error: {e}")
-        return jsonify({"error": "Agent error"}), 500
-
-
-def _handle_chat_django(request):
-    import json
-    from django.http import JsonResponse
-
-    if not _client:
-        return JsonResponse({"error": "BotVersion SDK not initialized."}, status=500)
-
-    try:
-        data = json.loads(request.body) if request.body else {}
-    except Exception:
-        data = {}
-
-    # ── TRACE LOGS ────────────────────────────────────────────────────────
-    print("=== DJANGO CHAT HANDLER TRACE ===")
-    print(f"[TRACE] raw request.body: {request.body[:500]}")
-    print(f"[TRACE] parsed data keys: {list(data.keys())}")
-    print(f"[TRACE] userContext from body: {data.get('userContext')}")
-    print(f"[TRACE] type: {type(data.get('userContext'))}")
-    print("=================================")
-    # ─────────────────────────────────────────────────────────────────────
-
-    user_context = data.get("userContext") or {}
-    print(f"[TRACE] user_context after 'or {{}}': {user_context}")
-
-    if not user_context:
-        print("[TRACE] user_context is empty — checking get_user_context option")
-        get_user_context = _options.get("get_user_context", None)
-        print(f"[TRACE] get_user_context function: {get_user_context}")
-        if get_user_context:
-            from .interceptor import _process_user_context
-            raw = get_user_context(request)
-            print(f"[TRACE] get_user_context(request) returned: {raw}")
-            user_context = _process_user_context(raw)
-            print(f"[TRACE] after _process_user_context: {user_context}")
-        else:
-            user_context = extract_default_context(request, "django")
-            print(f"[TRACE] extract_default_context returned: {user_context}")
-
-    print(f"[TRACE] FINAL user_context being sent to platform: {user_context}")
-
-    try:
-        response = _client.agent_chat({
-            "message": data.get("message", ""),
-            "conversation_history": data.get("conversationHistory", []),
-            "page_context": data.get("pageContext", {}),
-            "user_context": user_context,
-            "chatbot_id": data.get("chatbotId"),
-            "public_key": data.get("publicKey"),
-        })
-        return JsonResponse(response, status=200)
-    except Exception as e:
-        print(f"[BotVersion SDK] chat error: {e}")
-        return JsonResponse({"error": "Agent error"}, status=500)
-
-
 # ── Framework auto-detection ─────────────────────────────────────────────────
 
 def _detect_framework(app):
-    """
-    Auto-detects which framework is being used.
-    Checks the app object type first, then falls back to sys.modules.
-    """
     if app is not None:
         app_type = type(app).__module__ + "." + type(app).__name__
-
         if "fastapi" in app_type.lower():
             return "fastapi"
-
         if "flask" in app_type.lower():
             return "flask"
 
-    # No app passed — check if Django is running
     if app is None:
         if "django" in sys.modules:
             try:
@@ -442,7 +183,6 @@ def _detect_framework(app):
             except Exception:
                 pass
 
-    # Fallback — check sys.modules for installed packages
     if "fastapi" in sys.modules:
         return "fastapi"
     if "flask" in sys.modules:

@@ -471,35 +471,96 @@ function detectNextVersion(pkg) {
 function scoreExpressFile(content, filePath) {
   let score = 0;
   const filename = path.basename(filePath);
+  const normalizedPath = filePath.replace(/\\/g, "/");
 
-  // High confidence — direct instantiation
+  // ── EXISTING POSITIVE SIGNALS ──────────────────────────────────
   if (/express\s*\(\s*\)/.test(content)) score += 10;
-  // High confidence — subclass pattern
   if (/class\s+\w+\s+extends\s+express/.test(content)) score += 10;
-  // High confidence — factory function
   if (/(?:function|const|let|var)\s+(create|make|build|setup)App/.test(content))
     score += 8;
-  // High confidence — server started here
   if (/\.listen\s*\(/.test(content)) score += 8;
-  // Medium — registers routers (orchestrator file)
   if (/\.use\s*\(\s*['"`\/]/.test(content)) score += 5;
-  // Medium — mounts middleware
   if (/app\.use\s*\(/.test(content)) score += 4;
-  // Low — just imports express
   if (
     /require\s*\(\s*['"]express['"]\s*\)|from\s+['"]express['"]/.test(content)
   )
     score += 1;
 
-  // Penalties — likely a router file
+  // ── NEW POSITIVE SIGNALS — real API server ─────────────────────
+  const hasApiRoutes = /\.(get|post|put|delete|patch)\s*\(\s*['"`]\//.test(
+    content,
+  );
+  const returnsJson = /res\.json\s*\(/.test(content);
+  const hasRouterFiles = /require\s*\(['"`]\.\/routes/.test(content);
+  const hasControllers = /require\s*\(['"`]\.\/controllers/.test(content);
+
+  if (hasApiRoutes) score += 6;
+  if (returnsJson) score += 5;
+  if (hasRouterFiles) score += 4;
+  if (hasControllers) score += 3;
+
+  // ── EXISTING PENALTIES ─────────────────────────────────────────
   if (/^(?:const|let|var)\s+router\s*=\s*express\.Router\s*\(/m.test(content))
     score -= 8;
-  // Penalties — test files
   if (/(test_|_test|\.test\.|\.spec\.|conftest)/.test(filename)) score -= 10;
-  // Penalties — compiled output
   if (/dist\/|build\//.test(filePath)) score -= 10;
 
-  // Filename bonus
+  // ── NEW PENALTIES ──────────────────────────────────────────────
+
+  // Category 1: PHP servers
+  if (content.includes("php-express")) score -= 20;
+  if (content.includes("phpExpress")) score -= 20;
+  if (/app\.engine\s*\(\s*['"]php['"]/.test(content)) score -= 20;
+
+  // Category 2: View-only servers (any template engine, no API)
+  const hasViewEngine = /app\.set\s*\(\s*['"]view engine['"]/.test(content);
+  if (hasViewEngine && !hasApiRoutes && !returnsJson) score -= 15;
+
+  // Category 3: Static-only servers
+  const hasStatic = /express\.static\s*\(/.test(content);
+  const hasOnlyStatic = hasStatic && !hasApiRoutes && !returnsJson;
+  if (hasOnlyStatic) score -= 15;
+
+  // Category 4: Proxy servers
+  if (
+    content.includes("http-proxy-middleware") ||
+    content.includes("createProxyMiddleware")
+  )
+    score -= 15;
+
+  // Category 5: WebSocket-only servers
+  const hasSocketIO =
+    content.includes("socket.io") || content.includes("new Server(");
+  if (hasSocketIO && !hasApiRoutes) score -= 15;
+
+  // Category 6: Job/Queue servers
+  if (
+    (content.includes("require('bull')") ||
+      content.includes('require("bull")') ||
+      content.includes("bullmq") ||
+      content.includes("agenda")) &&
+    !hasApiRoutes
+  )
+    score -= 15;
+
+  // Category 7: Webhook-only servers
+  const hasWebhook = /['"`]\/webhook['"`]/.test(content);
+  const onlyWebhook = hasWebhook && !hasApiRoutes;
+  if (onlyWebhook) score -= 10;
+
+  // Category 8: Dev tooling servers
+  if (
+    content.includes("webpack-dev-middleware") ||
+    content.includes("webpackDevMiddleware") ||
+    content.includes("storybook")
+  )
+    score -= 15;
+
+  // Category 9: Test/mock servers (path-based)
+  if (/__mocks__|fixtures\/|test\/|__tests__\//.test(normalizedPath))
+    score -= 15;
+
+  // ── FILENAME BONUSES ───────────────────────────────────────────
   if (["server.js", "server.ts", "app.js", "app.ts"].includes(filename))
     score += 3;
   if (["index.js", "index.ts", "main.js", "main.ts"].includes(filename))

@@ -70,62 +70,18 @@ def prompt_entry_point():
     return ask("  Enter the path to your main server file (e.g. app.py or src/main.py): ")
 
 
-def prompt_auth_library(framework):
-    """
-    Shows list of supported Python auth libraries to pick from.
-    Mirrors JS promptAuthLibrary()
-    """
-    if framework == "flask":
-        choices = [
-            {"label": "Flask-Login", "value": {"name": "flask_login", "supported": True}},
-            {"label": "Flask-JWT-Extended", "value": {"name": "flask_jwt_extended", "supported": True}},
-            {"label": "Flask-Security", "value": {"name": "flask_security", "supported": True}},
-            {"label": "Flask-Praetorian", "value": {"name": "flask_praetorian", "supported": True}},
-            {"label": "Flask-HTTPAuth", "value": {"name": "flask_httpauth", "supported": True}},
-            {"label": "Other / Custom", "value": {"name": "custom", "supported": False}},
-            {"label": "No auth", "value": {"name": None, "supported": False}},
-        ]
-    elif framework == "fastapi":
-        choices = [
-            {"label": "FastAPI Users", "value": {"name": "fastapi_users", "supported": True}},
-            {"label": "PyJWT", "value": {"name": "pyjwt", "supported": True}},
-            {"label": "python-jose (JWT)", "value": {"name": "python_jose", "supported": True}},
-            {"label": "AuthX", "value": {"name": "authx", "supported": True}},
-            {"label": "fastapi-jwt-auth", "value": {"name": "fastapi_jwt_auth", "supported": True}},
-            {"label": "Authlib", "value": {"name": "authlib", "supported": True}},
-            {"label": "Other / Custom", "value": {"name": "custom", "supported": False}},
-            {"label": "No auth", "value": {"name": None, "supported": False}},
-        ]
-    elif framework == "django":
-        choices = [
-            {"label": "Django built-in auth", "value": {"name": "django_allauth", "supported": True}},
-            {"label": "Django REST Framework", "value": {"name": "django_rest_framework", "supported": True}},
-            {"label": "djangorestframework-simplejwt", "value": {"name": "djangorestframework_simplejwt", "supported": True}},
-            {"label": "dj-rest-auth", "value": {"name": "dj_rest_auth", "supported": True}},
-            {"label": "Django OAuth Toolkit", "value": {"name": "django_oauth_toolkit", "supported": True}},
-            {"label": "Other / Custom", "value": {"name": "custom", "supported": False}},
-            {"label": "No auth", "value": {"name": None, "supported": False}},
-        ]
-    else:
-        choices = [
-            {"label": "PyJWT", "value": {"name": "pyjwt", "supported": True}},
-            {"label": "Authlib", "value": {"name": "authlib", "supported": True}},
-            {"label": "Other / Custom", "value": {"name": "custom", "supported": False}},
-            {"label": "No auth", "value": {"name": None, "supported": False}},
-        ]
-
-    choice = ask_choice(
-        "We couldn't detect your auth library. Which one are you using?",
-        choices,
-    )
-    return choice["value"]
-
+# Config files that should never be appended to
+CONFIG_FILES = [
+    "settings.py",
+    "config.py",
+    "base.py",
+    "development.py",
+    "production.py",
+    "wsgi.py",
+    "asgi.py",
+]
 
 def prompt_missing_run_call(entry_point, framework):
-    """
-    Asks what to do when app.run() / uvicorn.run() can't be found.
-    Mirrors JS promptMissingListenCall()
-    """
     run_calls = {
         "flask": "app.run()",
         "fastapi": "uvicorn.run()",
@@ -133,9 +89,32 @@ def prompt_missing_run_call(entry_point, framework):
     }
     run_call = run_calls.get(framework, "server start call")
 
-    print(f"\n  ⚠  We couldn't find {run_call} in {entry_point}")
-    print("  Options:")
+    import os
+    entry_filename = os.path.basename(entry_point or "")
+    is_config_file = entry_filename in CONFIG_FILES
 
+    print(f"\n  ⚠  We couldn't find {run_call} in {entry_point}")
+
+    if is_config_file:
+        print(f"\n  ❌  \"{entry_filename}\" is a config file, not a server file.")
+        print("      Appending server code here would break your project.")
+        print("  Options:")
+
+        choices = [
+            {"label": "Enter the correct server file path manually", "value": "manual_path"},
+            {"label": "Skip — I'll add it manually", "value": "skip"},
+        ]
+
+        choice = ask_choice("How would you like to proceed?", choices)
+
+        if choice["value"] == "manual_path":
+            file_path = ask("  Enter file path: ")
+            return {"action": "manual_path", "file_path": file_path}
+
+        return {"action": choice["value"]}
+
+    # Normal flow — not a config file
+    print("  Options:")
     choices = [
         {"label": "Append to end of file", "value": "append"},
         {"label": "Enter the correct file path manually", "value": "manual_path"},
