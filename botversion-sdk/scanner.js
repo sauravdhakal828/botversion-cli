@@ -80,11 +80,14 @@ function scanExpressFileStatically(filePath, seen) {
       `[DEBUG] ${effectiveMethod} ${routePath} → bodyFields: ${JSON.stringify(bodyFields)}`,
     );
 
+    const routeParamMap = buildRouteParamMap(routePath, []);
+
     endpoints.push({
       method: effectiveMethod,
       path: routePath,
       description: "",
       requestBody: bodyFields,
+      routeParamMap: routeParamMap,
       detectedBy: "static-scan-file",
     });
   }
@@ -150,11 +153,14 @@ function extractRoutes(stack, prefix, endpoints, seen, bodyMap) {
           }
         }
 
+        const routeParamMap = buildRouteParamMap(routePath, []);
+
         endpoints.push({
           method: method,
           path: routePath,
           description: "",
           requestBody: requestBody,
+          routeParamMap: routeParamMap,
           detectedBy: "static-scan",
         });
       });
@@ -222,11 +228,14 @@ function scanNextJsRoutes(pagesDir) {
           bodyFields ||
           (method === "DELETE" && queryFields ? queryFields : null);
 
+        const routeParamMap = buildRouteParamMap(normalizedPath, []);
+
         endpoints.push({
           method: method,
           path: normalizedPath,
           description: "",
           requestBody: effectiveRequestBody,
+          routeParamMap: routeParamMap,
           detectedBy: "static-scan",
         });
       });
@@ -313,6 +322,35 @@ function buildParamSchema(params) {
   return schema;
 }
 
+function inferFieldType(fieldName, content) {
+  const arrayPatterns = [
+    new RegExp(
+      `${fieldName}\\s*\\.\\s*(map|filter|forEach|push|reduce|find|some|every|includes|join|slice|splice|length)\\b`,
+    ),
+    new RegExp(`Array\\.isArray\\s*\\(\\s*${fieldName}\\s*\\)`),
+    new RegExp(`for\\s*\\(.*of\\s+${fieldName}\\b`),
+    new RegExp(`\\[\\s*\\.\\.\\.${fieldName}\\s*\\]`),
+  ];
+  if (arrayPatterns.some((p) => p.test(content))) return "array";
+
+  const numberPatterns = [
+    new RegExp(`${fieldName}\\s*[+\\-*/%]\\s*\\d`),
+    new RegExp(`parseInt\\s*\\(\\s*${fieldName}`),
+    new RegExp(`parseFloat\\s*\\(\\s*${fieldName}`),
+    new RegExp(`Number\\s*\\(\\s*${fieldName}`),
+  ];
+  if (numberPatterns.some((p) => p.test(content))) return "number";
+
+  const boolPatterns = [
+    new RegExp(`${fieldName}\\s*===?\\s*(true|false)`),
+    new RegExp(`(true|false)\\s*===?\\s*${fieldName}`),
+    new RegExp(`Boolean\\s*\\(\\s*${fieldName}`),
+  ];
+  if (boolPatterns.some((p) => p.test(content))) return "boolean";
+
+  return "string";
+}
+
 function extractBodyFieldsFromFile(content) {
   const fields = new Set();
 
@@ -367,7 +405,11 @@ function extractBodyFieldsFromFile(content) {
 
   const properties = {};
   fields.forEach(function (field) {
-    properties[field] = { type: "string" };
+    const type = inferFieldType(field, content);
+    properties[field] =
+      type === "array"
+        ? { type: "array", items: { type: "object" } }
+        : { type };
   });
   console.log(
     `[DEBUG] extractBodyFieldsFromFile found fields: ${JSON.stringify([...fields])}`,
@@ -413,6 +455,8 @@ function scanNextJsAppRoutes(appDir) {
           method !== "GET" ? extractAppRouterBodyFields(content) : null;
         const queryFields = extractQueryFieldsFromFile(content);
 
+        const routeParamMap = buildRouteParamMap(routePath, []);
+
         endpoints.push({
           method: method,
           path: routePath,
@@ -420,6 +464,7 @@ function scanNextJsAppRoutes(appDir) {
           requestBody:
             bodyFields ||
             (method === "DELETE" && queryFields ? queryFields : null),
+          routeParamMap: routeParamMap,
           detectedBy: "static-scan",
         });
       });
@@ -493,10 +538,57 @@ function extractAppRouterBodyFields(content) {
 
   const properties = {};
   fields.forEach(function (field) {
-    properties[field] = { type: "string" };
+    const type = inferFieldType(field, content);
+    properties[field] =
+      type === "array"
+        ? { type: "array", items: { type: "object" } }
+        : { type };
   });
 
   return { type: "object", properties };
+}
+
+function buildRouteParamMap(routePath, segments) {
+  const paramMap = {};
+  const parts = routePath.split("/").filter(Boolean);
+
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+
+    // Skip catch-all [...slug] and optional [[...slug]]
+    if (/^\[?\[\.\.\./.test(part)) continue;
+
+    // Check if this segment is a dynamic param
+    // Handles both Next.js style [id] and Express style :id
+    const nextParamMatch = part.match(/^\[([^\]]+)\]$/);
+    const expressParamMatch = part.match(/^:([a-zA-Z_][a-zA-Z0-9_]*)$/);
+    const paramMatch = nextParamMatch || expressParamMatch;
+    if (!paramMatch) continue;
+
+    const paramName = paramMatch[1];
+
+    // If param already has a descriptive name like [projectId], use it as-is
+    if (paramName !== "id" && paramName !== "slug" && paramName !== "param") {
+      paramMap[paramName] = paramName;
+      continue;
+    }
+
+    // If param is just [id], look at the parent folder name to figure out type
+    // e.g. projects/[id] → projectId
+    const parentSegment = parts[i - 1];
+    if (parentSegment) {
+      // Remove any dynamic brackets from parent if it's also a param
+      const cleanParent = parentSegment.replace(/^\[([^\]]+)\]$/, "$1");
+      // Singularize simple plural names: projects → project, users → user
+      const singular = cleanParent.replace(/ies$/, "y").replace(/s$/, "");
+      paramMap[paramName] = singular + "Id";
+    } else {
+      // No parent segment, just call it "id"
+      paramMap[paramName] = "id";
+    }
+  }
+
+  return paramMap;
 }
 
 function extractQueryFieldsFromFile(content) {
@@ -777,9 +869,259 @@ function extractHandlerName(layer) {
   return null;
 }
 
+function convertNextJsSegment(segment) {
+  // Skip catch-all [...slug] and optional [[...slug]]
+  if (/^\[?\[\.\.\./.test(segment)) return null;
+  // Convert [projectId] → :projectId (Next.js / Nuxt / SvelteKit)
+  if (/^\[([^\]]+)\]$/.test(segment))
+    return segment.replace(/^\[([^\]]+)\]$/, ":$1");
+  // Convert $projectId → :projectId (Remix)
+  if (/^\$([a-zA-Z_][a-zA-Z0-9_]*)$/.test(segment))
+    return segment.replace(/^\$/, ":");
+  return segment;
+}
+
+function extractParamPositions(segments) {
+  const paramMap = {};
+  segments.forEach(function (segment, index) {
+    if (segment && segment.startsWith(":")) {
+      const paramName = segment.slice(1);
+      paramMap[paramName] = index;
+    }
+  });
+  return paramMap;
+}
+
+function scanConfigBasedRoutes(cwd) {
+  const fs = require("fs");
+  const path = require("path");
+  const patterns = [];
+  const seen = new Set();
+
+  // Files to scan for route definitions
+  const filesToCheck = [
+    // React Router — common file names
+    path.join(cwd, "src", "App.jsx"),
+    path.join(cwd, "src", "App.tsx"),
+    path.join(cwd, "src", "App.js"),
+    path.join(cwd, "src", "router.jsx"),
+    path.join(cwd, "src", "router.tsx"),
+    path.join(cwd, "src", "router.js"),
+    path.join(cwd, "src", "routes.jsx"),
+    path.join(cwd, "src", "routes.tsx"),
+    path.join(cwd, "src", "routes.js"),
+    path.join(cwd, "src", "Router.jsx"),
+    path.join(cwd, "src", "Router.tsx"),
+    // Vue Router
+    path.join(cwd, "src", "router", "index.js"),
+    path.join(cwd, "src", "router", "index.ts"),
+    path.join(cwd, "src", "router.js"),
+    path.join(cwd, "src", "router.ts"),
+    // Angular
+    path.join(cwd, "src", "app", "app-routing.module.ts"),
+    path.join(cwd, "src", "app", "app.routes.ts"),
+  ];
+
+  for (const filePath of filesToCheck) {
+    if (!fs.existsSync(filePath)) continue;
+
+    let content;
+    try {
+      content = fs.readFileSync(filePath, "utf8");
+    } catch {
+      continue;
+    }
+
+    console.log("[BotVersion SDK] Scanning config-based routes in:", filePath);
+
+    // Pattern 1 — React Router JSX: <Route path="/:projectId/dashboard" />
+    const jsxRouteMatches = content.matchAll(
+      /<Route[^>]+path=["']([^"']+)["']/g,
+    );
+    for (const match of jsxRouteMatches) {
+      addConfigPattern(match[1], seen, patterns);
+    }
+
+    // Pattern 2 — React Router / Vue Router object: { path: '/:projectId/dashboard' }
+    const objectRouteMatches = content.matchAll(/path\s*:\s*["']([^"']+)["']/g);
+    for (const match of objectRouteMatches) {
+      addConfigPattern(match[1], seen, patterns);
+    }
+
+    // Pattern 3 — Angular: { path: ':projectId/dashboard' }
+    const angularRouteMatches = content.matchAll(
+      /\{\s*path\s*:\s*["']([^"']+)["']/g,
+    );
+    for (const match of angularRouteMatches) {
+      addConfigPattern(match[1], seen, patterns);
+    }
+  }
+
+  return patterns;
+}
+
+function addConfigPattern(routePath, seen, patterns) {
+  // Skip empty, wildcard and catch-all routes
+  if (!routePath || routePath === "*" || routePath === "**") return;
+  // Skip routes with no dynamic params
+  if (!routePath.includes(":") && !routePath.includes("$")) return;
+
+  // Normalize — ensure leading slash
+  const normalized = routePath.startsWith("/") ? routePath : "/" + routePath;
+
+  if (seen.has(normalized)) return;
+  seen.add(normalized);
+
+  // Extract params and their positions
+  const segments = normalized.split("/").filter(Boolean);
+  const paramMap = {};
+  segments.forEach(function (segment, index) {
+    if (segment.startsWith(":")) {
+      paramMap[segment.slice(1)] = index;
+    }
+  });
+
+  if (Object.keys(paramMap).length === 0) return;
+
+  patterns.push({ pattern: normalized, params: paramMap });
+  console.log(
+    "[BotVersion SDK] Found config-based route pattern:",
+    normalized,
+    "→",
+    paramMap,
+  );
+}
+
+function scanFrontendRoutes(cwd) {
+  const fs = require("fs");
+  const path = require("path");
+  const patterns = [];
+  const seen = new Set();
+
+  const dirsToScan = [
+    // Next.js Pages Router
+    path.join(cwd, "pages"),
+    path.join(cwd, "src", "pages"),
+    // Next.js App Router
+    path.join(cwd, "app"),
+    path.join(cwd, "src", "app"),
+    // Nuxt.js
+    path.join(cwd, "pages"),
+    // SvelteKit
+    path.join(cwd, "src", "routes"),
+    path.join(cwd, "routes"),
+    // Remix
+    path.join(cwd, "app", "routes"),
+  ];
+
+  function walkDir(dir, routeSegments) {
+    if (!fs.existsSync(dir)) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+
+    entries.forEach(function (file) {
+      const fullPath = path.join(dir, file);
+      let stat;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        return;
+      }
+
+      if (stat.isDirectory()) {
+        if (file === "api") return; // skip API routes
+        if (file.startsWith("_")) return; // skip Next.js internals
+        if (/^\(.*\)$/.test(file)) {
+          // route groups like (marketing) — don't add to URL
+          walkDir(fullPath, routeSegments);
+          return;
+        }
+        const segment = convertNextJsSegment(file);
+        if (!segment) return;
+        walkDir(fullPath, routeSegments.concat(segment));
+        return;
+      }
+
+      if (!/\.(js|ts|jsx|tsx|vue|svelte)$/.test(file)) return;
+      if (file.startsWith("_")) return;
+
+      const routeName = file.replace(/\.(js|ts|jsx|tsx|vue|svelte)$/, "");
+
+      // Skip non-page files
+      if (
+        ["layout", "loading", "error", "template", "not-found"].includes(
+          routeName,
+        )
+      )
+        return;
+
+      // SvelteKit uses +page.svelte — skip +layout, +error etc.
+      if (routeName.startsWith("+") && routeName !== "+page") return;
+
+      // Remix uses dots as path separators — e.g. $projectId.dashboard.tsx → /:projectId/dashboard
+      const isRemixRoute =
+        routeName.includes(".") && !routeName.startsWith("+");
+      let finalSegments;
+
+      if (isRemixRoute) {
+        // Split by dots and convert each segment
+        const remixSegments = routeName
+          .split(".")
+          .map((s) => convertNextJsSegment(s) || s);
+        finalSegments = routeSegments.concat(remixSegments);
+      } else if (
+        routeName === "index" ||
+        routeName === "page" ||
+        routeName === "+page"
+      ) {
+        finalSegments = routeSegments;
+      } else {
+        finalSegments = routeSegments.concat(
+          convertNextJsSegment(routeName) || routeName,
+        );
+      }
+
+      const pattern = "/" + finalSegments.filter(Boolean).join("/");
+      if (seen.has(pattern)) return;
+      seen.add(pattern);
+
+      const paramMap = extractParamPositions(finalSegments);
+      if (Object.keys(paramMap).length === 0) return; // no dynamic params, skip static routes
+
+      patterns.push({ pattern, params: paramMap });
+      console.log(
+        "[BotVersion SDK] Found frontend route pattern:",
+        pattern,
+        "→",
+        paramMap,
+      );
+    });
+  }
+
+  dirsToScan.forEach(function (dir) {
+    if (fs.existsSync(dir)) walkDir(dir, []);
+  });
+
+  // Also scan config-based frameworks (React Router, Vue Router, Angular)
+  const configPatterns = scanConfigBasedRoutes(cwd);
+  configPatterns.forEach(function (p) {
+    if (!seen.has(p.pattern)) {
+      seen.add(p.pattern);
+      patterns.push(p);
+    }
+  });
+
+  return patterns;
+}
+
 module.exports = {
   scanExpressRoutes,
   scanNextJsRoutes,
   scanNextJsAppRoutes,
   extractPathParams,
+  scanFrontendRoutes,
 };

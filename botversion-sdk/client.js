@@ -112,6 +112,33 @@ BotVersionClient.prototype.updateEndpoint = function (endpoint) {
   });
 };
 
+BotVersionClient.prototype.registerRoutePatterns = function (patterns) {
+  var self = this;
+  if (!patterns || patterns.length === 0) return Promise.resolve();
+
+  if (self.debug) {
+    console.log(
+      "[BotVersion SDK] Sending",
+      patterns.length,
+      "route patterns to platform",
+    );
+  }
+
+  return self
+    ._post("/api/sdk/register-route-patterns", {
+      workspaceKey: self.apiKey,
+      patterns: patterns,
+    })
+    .catch(function (err) {
+      if (self.debug) {
+        console.warn(
+          "[BotVersion SDK] Failed to register route patterns:",
+          err.message,
+        );
+      }
+    });
+};
+
 /**
  * Get all registered endpoints for this workspace
  */

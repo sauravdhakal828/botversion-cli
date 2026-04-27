@@ -2,9 +2,10 @@
 import sys
 import threading
 import builtins
+import os
 
 from .client import BotVersionClient
-from .scanner import scan_routes
+from .scanner import scan_routes, scan_frontend_routes
 from .interceptor import (
     attach_fastapi_interceptor,
     attach_flask_interceptor,
@@ -142,6 +143,13 @@ def init(app=None, api_key=None, **options):
             if debug:
                 import traceback
                 traceback.print_exc()
+
+        cwd = options.get("cwd", os.getcwd())
+        route_patterns = scan_frontend_routes(cwd)
+        if route_patterns:
+            print(f"[BotVersion SDK] Found {len(route_patterns)} frontend route patterns")
+            _client.register_route_patterns(route_patterns)
+            print("[BotVersion SDK] ✅ Route patterns registered")
 
         print("[BotVersion SDK] ✅ Initialization complete")
 

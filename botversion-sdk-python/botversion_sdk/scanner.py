@@ -252,7 +252,7 @@ def extract_drf_schema(callback, method):
                 fields.add(m.group(1))
 
             if fields:
-                properties = {f: {"type": "string", "description": f.replace("_", " ").title()} for f in fields}
+                properties = {f: {"type": infer_field_type(f, src), "description": f.replace("_", " ").title()} for f in fields}
                 return {"type": "object", "properties": properties}
 
     except Exception:
@@ -409,7 +409,7 @@ def extract_flask_schema(view_func, method):
             fields.add(m.group(1))
 
         if fields:
-            properties = {f: {"type": "string"} for f in fields}
+            properties = {f: {"type": infer_field_type(f, src)} for f in fields}
             return {"type": "object", "properties": properties}
 
     except Exception:
@@ -587,6 +587,45 @@ def normalize_flask_path(rule):
     return re.sub(r"<(?:[^:>]+:)?([^>]+)>", r":\1", rule)
 
 
+def infer_field_type(field_name, source_code):
+    """Infer the type of a field from how it's used in source code."""
+    import re
+
+    # Check if used as array/list
+    array_patterns = [
+        rf"{field_name}\s*\.\s*(append|extend|pop|remove|sort|reverse|__iter__|__len__)",
+        rf"for\s+\w+\s+in\s+{field_name}\b",
+        rf"len\s*\(\s*{field_name}\s*\)",
+        rf"isinstance\s*\(\s*{field_name}\s*,\s*(list|List)\s*\)",
+        rf"\[\s*\.\.\.{field_name}\s*\]",
+    ]
+    if any(re.search(p, source_code) for p in array_patterns):
+        return "array"
+
+    # Check if used as number
+    number_patterns = [
+        rf"{field_name}\s*[+\-*/%]\s*\d",
+        rf"int\s*\(\s*{field_name}\s*\)",
+        rf"float\s*\(\s*{field_name}\s*\)",
+        rf"isinstance\s*\(\s*{field_name}\s*,\s*(int|float)\s*\)",
+    ]
+    if any(re.search(p, source_code) for p in number_patterns):
+        return "number"
+
+    # Check if used as boolean
+    bool_patterns = [
+        rf"{field_name}\s*==\s*(True|False)",
+        rf"(True|False)\s*==\s*{field_name}",
+        rf"isinstance\s*\(\s*{field_name}\s*,\s*bool\s*\)",
+        rf"bool\s*\(\s*{field_name}\s*\)",
+    ]
+    if any(re.search(p, source_code) for p in bool_patterns):
+        return "boolean"
+
+    return "string"
+
+
+
 def extract_path_params(path):
     """Extract :param names from a path like /users/:id/posts/:postId"""
     return re.findall(r":([a-zA-Z_][a-zA-Z0-9_]*)", path)
@@ -729,3 +768,195 @@ def extract_request_body_schema(route, method):
 
     print(f"[DEBUG] <<< returning None for {method} {getattr(route, 'path', '?')}")
     return None
+
+
+def scan_frontend_routes(cwd):
+    import os
+
+    patterns = []
+    seen = set()
+
+    # Dirs to scan for file-based frameworks (Next.js, Nuxt, SvelteKit, Remix)
+    dirs_to_scan = [
+        os.path.join(cwd, "pages"),
+        os.path.join(cwd, "src", "pages"),
+        os.path.join(cwd, "app"),
+        os.path.join(cwd, "src", "app"),
+        os.path.join(cwd, "src", "routes"),
+        os.path.join(cwd, "routes"),
+        os.path.join(cwd, "app", "routes"),
+    ]
+
+    for base_dir in dirs_to_scan:
+        if os.path.isdir(base_dir):
+            _walk_frontend_dir(base_dir, [], patterns, seen)
+
+    # Also scan config-based frameworks (React Router, Vue Router, Angular)
+    config_patterns = _scan_config_based_routes(cwd)
+    for p in config_patterns:
+        if p["pattern"] not in seen:
+            seen.add(p["pattern"])
+            patterns.append(p)
+
+    return patterns
+
+
+
+def _walk_frontend_dir(directory, segments, patterns, seen):
+    import os
+
+    SKIP_DIRS = {"api", "node_modules", ".git", ".next", "dist", "build"}
+    PAGE_FILES = {"page", "index", "+page"}
+    SKIP_FILES = {"layout", "loading", "error", "template", "not-found"}
+
+    try:
+        entries = sorted(os.listdir(directory))
+    except OSError:
+        return
+
+    for entry in entries:
+        full_path = os.path.join(directory, entry)
+
+        if os.path.isdir(full_path):
+            if entry in SKIP_DIRS:
+                continue
+            # Route groups like (marketing) — don't add to URL
+            if entry.startswith("(") and entry.endswith(")"):
+                _walk_frontend_dir(full_path, segments, patterns, seen)
+                continue
+            segment = _convert_segment(entry)
+            if segment is None:
+                continue
+            _walk_frontend_dir(full_path, segments + [segment], patterns, seen)
+
+        elif os.path.isfile(full_path):
+            # Only process JS/TS/Vue/Svelte files
+            if not re.search(r"\.(js|ts|jsx|tsx|vue|svelte)$", entry):
+                continue
+            if entry.startswith("_") or (entry.startswith("+") and not entry.startswith("+page")):
+                continue
+
+            route_name = re.sub(r"\.(js|ts|jsx|tsx|vue|svelte)$", "", entry)
+
+            if route_name in SKIP_FILES:
+                continue
+
+            # Remix uses dots as separators: $projectId.dashboard.tsx
+            if "." in route_name and not route_name.startswith("+"):
+                remix_segments = [_convert_segment(s) or s for s in route_name.split(".")]
+                final_segments = segments + remix_segments
+            elif route_name in PAGE_FILES:
+                final_segments = segments
+            else:
+                converted = _convert_segment(route_name)
+                final_segments = segments + [converted or route_name]
+
+            pattern = "/" + "/".join(s for s in final_segments if s)
+            if pattern in seen:
+                continue
+            seen.add(pattern)
+
+            param_map = _extract_param_positions(final_segments)
+            if not param_map:
+                continue  # skip static routes with no dynamic params
+
+            patterns.append({"pattern": pattern, "params": param_map})
+            print(f"[BotVersion SDK] Found frontend route pattern: {pattern} → {param_map}")
+
+
+
+def _convert_segment(segment):
+    # Skip catch-all [...slug] and [[...slug]]
+    if re.match(r"^\[?\[?\.\.\.", segment):
+        return None
+    # Next.js/Nuxt [id] → :id
+    match = re.match(r"^\[([^\]]+)\]$", segment)
+    if match:
+        return ":" + match.group(1)
+    # Remix $id → :id
+    match = re.match(r"^\$([a-zA-Z_][a-zA-Z0-9_]*)$", segment)
+    if match:
+        return ":" + match.group(1)
+    return segment
+
+
+def _extract_param_positions(segments):
+    param_map = {}
+    for i, segment in enumerate(segments):
+        if segment and segment.startswith(":"):
+            param_map[segment[1:]] = i
+    return param_map
+
+
+
+def _scan_config_based_routes(cwd):
+    import os
+
+    patterns = []
+    seen = set()
+
+    files_to_check = [
+        os.path.join(cwd, "src", "App.jsx"),
+        os.path.join(cwd, "src", "App.tsx"),
+        os.path.join(cwd, "src", "App.js"),
+        os.path.join(cwd, "src", "router.jsx"),
+        os.path.join(cwd, "src", "router.tsx"),
+        os.path.join(cwd, "src", "router.js"),
+        os.path.join(cwd, "src", "router.ts"),
+        os.path.join(cwd, "src", "routes.jsx"),
+        os.path.join(cwd, "src", "routes.tsx"),
+        os.path.join(cwd, "src", "routes.js"),
+        os.path.join(cwd, "src", "router", "index.js"),
+        os.path.join(cwd, "src", "router", "index.ts"),
+        os.path.join(cwd, "src", "app", "app-routing.module.ts"),
+        os.path.join(cwd, "src", "app", "app.routes.ts"),
+    ]
+
+    for file_path in files_to_check:
+        if not os.path.isfile(file_path):
+            continue
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except OSError:
+            continue
+
+        print(f"[BotVersion SDK] Scanning config-based routes in: {file_path}")
+
+        # React Router JSX: <Route path="/:projectId/dashboard" />
+        for match in re.finditer(r'<Route[^>]+path=["\']([^"\']+)["\']', content):
+            _add_config_pattern(match.group(1), seen, patterns)
+
+        # React Router / Vue Router object: { path: '/:projectId/dashboard' }
+        for match in re.finditer(r'path\s*:\s*["\']([^"\']+)["\']', content):
+            _add_config_pattern(match.group(1), seen, patterns)
+
+        # Angular: { path: ':projectId/dashboard' }
+        for match in re.finditer(r'\{\s*path\s*:\s*["\']([^"\']+)["\']', content):
+            _add_config_pattern(match.group(1), seen, patterns)
+
+    return patterns
+
+
+def _add_config_pattern(route_path, seen, patterns):
+    if not route_path or route_path in ("*", "**"):
+        return
+    if ":" not in route_path and "$" not in route_path:
+        return  # no dynamic params, skip
+
+    normalized = route_path if route_path.startswith("/") else "/" + route_path
+    if normalized in seen:
+        return
+    seen.add(normalized)
+
+    segments = [s for s in normalized.split("/") if s]
+    param_map = {}
+    for i, segment in enumerate(segments):
+        if segment.startswith(":"):
+            param_map[segment[1:]] = i
+
+    if not param_map:
+        return
+
+    patterns.append({"pattern": normalized, "params": param_map})
+    print(f"[BotVersion SDK] Found config-based route pattern: {normalized} → {param_map}")

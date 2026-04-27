@@ -214,6 +214,28 @@ var BotVersion = {
           });
       }
 
+      var routePatterns = scanner.scanFrontendRoutes(
+        options.cwd || process.cwd(),
+      );
+      if (routePatterns.length > 0) {
+        console.log(
+          "[BotVersion SDK] Found",
+          routePatterns.length,
+          "frontend route patterns",
+        );
+        self._client
+          .registerRoutePatterns(routePatterns)
+          .then(function () {
+            console.log("[BotVersion SDK] ✅ Route patterns registered");
+          })
+          .catch(function (err) {
+            console.error(
+              "[BotVersion SDK] ❌ Failed to register route patterns:",
+              err.message,
+            );
+          });
+      }
+
       console.log("[BotVersion SDK] ✅ Initialization complete");
     }, 500);
   },
