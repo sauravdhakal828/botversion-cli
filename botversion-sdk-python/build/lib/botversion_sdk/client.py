@@ -101,6 +101,23 @@ class BotVersionClient:
             if self.debug:
                 print(f"[BotVersion SDK] ⚠ Failed to update endpoint: {e}")
 
+
+    # ── Register frontend route patterns ─────────────────────────────────────────
+
+    def register_route_patterns(self, patterns):
+        if not patterns:
+            return
+        try:
+            self._post("/api/sdk/register-route-patterns", {
+                "workspaceKey": self.api_key,
+                "patterns": patterns,
+            })
+            if self.debug:
+                print(f"[BotVersion SDK] ✅ Registered {len(patterns)} route patterns")
+        except Exception as e:
+            if self.debug:
+                print(f"[BotVersion SDK] ⚠ Failed to register route patterns: {e}")
+
     # ── Get all endpoints ────────────────────────────────────────────────────
 
     def get_endpoints(self):

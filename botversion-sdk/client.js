@@ -169,7 +169,7 @@ BotVersionClient.prototype._post = function (path, data) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(body),
+        "Content-Length": String(Buffer.byteLength(body)),
         "X-BotVersion-SDK": "1.0.0",
       },
       timeout: self.timeout,
