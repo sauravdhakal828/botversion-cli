@@ -236,6 +236,7 @@ var BotVersion = {
           });
       }
 
+      self._client.connect();
       console.log("[BotVersion SDK] ✅ Initialization complete");
     }, 500);
   },

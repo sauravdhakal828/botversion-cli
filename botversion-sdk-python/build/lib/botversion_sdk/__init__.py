@@ -151,6 +151,8 @@ def init(app=None, api_key=None, **options):
             _client.register_route_patterns(route_patterns)
             print("[BotVersion SDK] ✅ Route patterns registered")
 
+        _client.connect()
+
         print("[BotVersion SDK] ✅ Initialization complete")
 
     t = threading.Timer(0.5, _run_scan)

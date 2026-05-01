@@ -163,41 +163,6 @@ Visit https://docs.botversion.com for manual setup instructions.
     )
 
 
-# ── CORS generation ───────────────────────────────────────────────────────────
-
-def generate_fastapi_cors(app_var, allowed_origins):
-    return f"""# CORS — auto-added by BotVersion init
-from fastapi.middleware.cors import CORSMiddleware
-
-{app_var}.add_middleware(
-    CORSMiddleware,
-    allow_origins={repr(allowed_origins)},
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)""".strip()
-
-
-def generate_flask_cors(app_var, allowed_origins):
-    return f"""# CORS — auto-added by BotVersion init
-from flask_cors import CORS
-
-CORS({app_var}, origins={repr(allowed_origins)})""".strip()
-
-
-def generate_django_cors_settings(allowed_origins):
-    return f"\n# BotVersion — only allow requests from BotVersion platform\nCORS_ALLOWED_ORIGINS = {repr(allowed_origins)}\n"
-
-
-def generate_django_cors_manual_instructions():
-    return (
-        "Add to your settings.py:\n\n"
-        "    INSTALLED_APPS += ['corsheaders']\n\n"
-        "    MIDDLEWARE = ['corsheaders.middleware.CorsMiddleware'] + MIDDLEWARE\n\n"
-        "    CORS_ALLOWED_ORIGINS = ['http://localhost:3000']"
-    )
-
-
 # ── .env file generation ──────────────────────────────────────────────────────
 
 def generate_env_line(api_key):

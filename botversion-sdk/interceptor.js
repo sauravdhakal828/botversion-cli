@@ -2,6 +2,110 @@
 "use strict";
 
 /**
+ * Makes an internal HTTP request to the user's own backend.
+ * Forwards cookies, auth headers, and CSRF tokens.
+ */
+function makeInternalRequest(method, path, body, cookies, headers, baseUrl) {
+  return new Promise(function (resolve) {
+    var http = require("http");
+    var https = require("https");
+    var url = require("url");
+
+    baseUrl = baseUrl || "http://127.0.0.1:8000";
+    var fullUrl = baseUrl + path;
+    var parsedUrl = url.parse(fullUrl);
+    var isHttps = parsedUrl.protocol === "https:";
+    var lib = isHttps ? https : http;
+
+    var bodyStr = body ? JSON.stringify(body) : null;
+
+    var reqHeaders = {
+      "Content-Type": "application/json",
+    };
+
+    if (bodyStr) {
+      reqHeaders["Content-Length"] = String(Buffer.byteLength(bodyStr));
+    }
+
+    // Forward cookies — this is what identifies the user
+    if (cookies) reqHeaders["Cookie"] = cookies;
+
+    // Forward auth header
+    var authHeader =
+      headers && (headers["authorization"] || headers["Authorization"]);
+    if (authHeader) reqHeaders["Authorization"] = authHeader;
+
+    // Forward CSRF token
+    var csrf =
+      headers &&
+      (headers["x-csrftoken"] ||
+        headers["X-CSRFToken"] ||
+        headers["x-xsrf-token"] ||
+        headers["X-XSRF-TOKEN"]);
+    if (csrf) reqHeaders["X-CSRFToken"] = csrf;
+
+    var reqOptions = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (isHttps ? 443 : 80),
+      path: parsedUrl.path,
+      method: method.toUpperCase(),
+      headers: reqHeaders,
+      timeout: 30000,
+    };
+
+    var req = lib.request(reqOptions, function (res) {
+      var data = "";
+      res.on("data", function (chunk) {
+        data += chunk;
+      });
+      res.on("end", function () {
+        var parsed;
+        try {
+          parsed = JSON.parse(data);
+        } catch (e) {
+          parsed = { raw: data };
+        }
+
+        // Handle redirects
+        if (
+          res.statusCode >= 300 &&
+          res.statusCode < 400 &&
+          res.headers.location
+        ) {
+          makeInternalRequest(
+            res.statusCode === 303 ? "GET" : method,
+            res.headers.location,
+            res.statusCode === 303 ? null : body,
+            cookies,
+            headers,
+            baseUrl,
+          ).then(resolve);
+          return;
+        }
+
+        resolve({
+          status: res.statusCode,
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          data: parsed,
+        });
+      });
+    });
+
+    req.on("error", function (err) {
+      resolve({ status: 500, ok: false, data: { error: err.message } });
+    });
+
+    req.on("timeout", function () {
+      req.destroy();
+      resolve({ status: 500, ok: false, data: { error: "Request timed out" } });
+    });
+
+    if (bodyStr) req.write(bodyStr);
+    req.end();
+  });
+}
+
+/**
  * Attaches a middleware to the Express app that
  * silently intercepts every request and reports
  * new endpoints to BotVersion platform.
@@ -90,6 +194,10 @@ function attachInterceptor(app, client, options) {
     }
 
     next();
+  });
+  // Register executor so WebSocket can forward calls to user's backend
+  client.setExecutor(function (method, path, body, cookies, headers, baseUrl) {
+    return makeInternalRequest(method, path, body, cookies, headers, baseUrl);
   });
 }
 

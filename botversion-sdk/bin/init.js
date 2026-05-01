@@ -310,7 +310,6 @@ async function setupExpress(detected, args, changes, projectInfo) {
   }
 
   success(`Entry point: ${path.relative(detected.cwd, entryPoint)}`);
-  let entryPointTracked = false;
 
   // ── Write API key to .env ──────────────────────────────────────────────
   const shouldWriteEnv = await prompts.confirm(
@@ -343,70 +342,6 @@ async function setupExpress(detected, args, changes, projectInfo) {
     changes.manual.push(
       `Add to your .env file:\n\n    BOTVERSION_API_KEY=${args.key}`,
     );
-  }
-
-  // ── Inject CORS ──────────────────────────────────────────────────────────
-  step("Configuring CORS...");
-
-  const allowedOrigins = [];
-  if (projectInfo.apiUrl) allowedOrigins.push(projectInfo.apiUrl);
-  if (projectInfo.cdnUrl) {
-    try {
-      const cdnOrigin = new URL(projectInfo.cdnUrl).origin;
-      if (!allowedOrigins.includes(cdnOrigin)) allowedOrigins.push(cdnOrigin);
-    } catch {}
-  }
-  if (allowedOrigins.length === 0) allowedOrigins.push("http://localhost:3000");
-
-  if (detector.detectCors(entryPoint, "express")) {
-    info("CORS already configured — skipping.");
-  } else {
-    // Install cors package
-    const { execSync } = require("child_process");
-    const installCmd =
-      detected.packageManager === "yarn"
-        ? "yarn add cors"
-        : detected.packageManager === "pnpm"
-          ? "pnpm add cors"
-          : detected.packageManager === "bun"
-            ? "bun add cors"
-            : "npm install cors";
-
-    try {
-      execSync(installCmd, { cwd: detected.cwd, stdio: "inherit" });
-      success("cors package installed successfully");
-    } catch (err) {
-      warn("Could not install cors automatically.");
-      changes.manual.push(`Install cors manually:\n\n    ${installCmd}`);
-    }
-
-    const corsCode = generator.generateExpressCors(
-      detected.appVarName || "app",
-      allowedOrigins,
-    );
-    const corsResult = writer.injectCors(
-      entryPoint,
-      corsCode,
-      detected.appVarName || "app",
-    );
-
-    if (corsResult.success) {
-      success(
-        `Added CORS configuration to ${path.relative(detected.cwd, entryPoint)}`,
-      );
-      if (!entryPointTracked) {
-        changes.modified.push(path.relative(detected.cwd, entryPoint));
-        entryPointTracked = true;
-      }
-      if (corsResult.backup) changes.backups.push(corsResult.backup);
-    } else if (corsResult.reason === "already_exists") {
-      info("CORS already configured — skipping.");
-    } else {
-      warn("Could not auto-configure CORS — add manually:");
-      changes.manual.push(
-        generator.generateExpressCorsManualInstructions(allowedOrigins),
-      );
-    }
   }
 
   if (!detected.hasDotenv) {
@@ -486,10 +421,7 @@ async function setupExpress(detected, args, changes, projectInfo) {
 
     if (result.success) {
       success(`Injected BotVersion.init() before app.listen()`);
-      if (!entryPointTracked) {
-        changes.modified.push(path.relative(detected.cwd, entryPoint));
-        entryPointTracked = true;
-      }
+      changes.modified.push(path.relative(detected.cwd, entryPoint));
       if (result.backup) changes.backups.push(result.backup);
     } else if (result.reason === "already_exists") {
       warn("BotVersion already found in entry point — skipping injection.");
@@ -580,87 +512,6 @@ async function setupNextJs(detected, args, changes, projectInfo) {
   info2(
     `Router: ${nextInfo.pagesRouter ? "Pages" : ""}${nextInfo.pagesRouter && nextInfo.appRouter ? " + " : ""}${nextInfo.appRouter ? "App" : ""}`,
   );
-
-  // ── CORS middleware for Next.js ──────────────────────────────────────────
-  step("Configuring CORS...");
-
-  const allowedOrigins = [];
-  if (projectInfo.apiUrl) allowedOrigins.push(projectInfo.apiUrl);
-  if (projectInfo.cdnUrl) {
-    try {
-      const cdnOrigin = new URL(projectInfo.cdnUrl).origin;
-      if (!allowedOrigins.includes(cdnOrigin)) allowedOrigins.push(cdnOrigin);
-    } catch {}
-  }
-  if (allowedOrigins.length === 0) allowedOrigins.push("http://localhost:3000");
-
-  const middlewareInfo = detector.detectNextJsMiddleware(detected.cwd);
-
-  if (middlewareInfo.hasCors) {
-    // Already has CORS — skip entirely
-    info("CORS already configured in middleware — skipping.");
-  } else if (middlewareInfo.exists) {
-    // Middleware exists but no CORS — inject into it
-    info(
-      `Found existing middleware at ${path.relative(detected.cwd, middlewareInfo.path)} — injecting CORS...`,
-    );
-
-    const injectResult = writer.injectCorsIntoMiddleware(
-      middlewareInfo.path,
-      allowedOrigins,
-    );
-
-    if (injectResult.success) {
-      success(
-        `Injected CORS into ${path.relative(detected.cwd, middlewareInfo.path)}`,
-      );
-      changes.modified.push(path.relative(detected.cwd, middlewareInfo.path));
-      if (injectResult.backup) changes.backups.push(injectResult.backup);
-    } else if (injectResult.reason === "already_exists") {
-      info("CORS already configured in middleware — skipping.");
-    } else {
-      warn("Could not inject CORS into existing middleware — add manually:");
-      changes.manual.push(
-        `Add to your middleware file (${path.relative(detected.cwd, middlewareInfo.path)}):\n\n` +
-          `  response.headers.set('Access-Control-Allow-Origin', '${allowedOrigins[0]}');\n` +
-          `  response.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');\n` +
-          `  response.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');`,
-      );
-    }
-  } else {
-    // No middleware file — create one
-    const isESM = detected.moduleSystem === "esm";
-    const middlewareContent = detected.isTypeScript
-      ? generator.generateNextJsMiddleware(allowedOrigins)
-      : generator.generateNextJsMiddlewareJs(allowedOrigins, isESM);
-
-    const middlewareFile = detected.hasSrc
-      ? path.join(
-          detected.cwd,
-          "src",
-          detected.isTypeScript ? "middleware.ts" : "middleware.js",
-        )
-      : path.join(
-          detected.cwd,
-          detected.isTypeScript ? "middleware.ts" : "middleware.js",
-        );
-
-    const middlewareResult = writer.createFile(
-      middlewareFile,
-      middlewareContent,
-      args.force,
-    );
-
-    if (middlewareResult.success) {
-      success(`Created ${path.relative(detected.cwd, middlewareFile)}`);
-      changes.created.push(path.relative(detected.cwd, middlewareFile));
-    } else {
-      warn("Could not create middleware file — add CORS manually.");
-      changes.manual.push(
-        `Create middleware.ts in your project root with CORS config for: ${allowedOrigins.join(", ")}`,
-      );
-    }
-  }
 
   // ── 1. Create instrumentation.js ──────────────────────────────────────────
   const instrExt = detected.generateTs ? ".ts" : ".js";

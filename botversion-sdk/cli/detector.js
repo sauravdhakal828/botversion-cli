@@ -1120,54 +1120,6 @@ function detect(cwd) {
   return result;
 }
 
-// ─── CORS DETECTION ───────────────────────────────────────────────────────────
-
-function detectCors(filePath, framework) {
-  if (!filePath || !fs.existsSync(filePath)) return false;
-  const content = fs.readFileSync(filePath, "utf8");
-
-  if (framework === "express") {
-    return (
-      content.includes("cors(") ||
-      content.includes("require('cors')") ||
-      content.includes('require("cors")')
-    );
-  }
-  return false;
-}
-
-// ─── NEXT.JS CORS DETECTION ───────────────────────────────────────────────────
-
-function detectNextJsMiddleware(cwd) {
-  const candidates = [
-    "middleware.ts",
-    "middleware.tsx",
-    "middleware.js",
-    "middleware.jsx",
-    "middleware.mjs",
-    "middleware.mts",
-    "src/middleware.ts",
-    "src/middleware.tsx",
-    "src/middleware.js",
-    "src/middleware.jsx",
-    "src/middleware.mjs",
-    "src/middleware.mts",
-  ];
-
-  for (const candidate of candidates) {
-    const fullPath = path.join(cwd, candidate);
-    if (fs.existsSync(fullPath)) {
-      const content = fs.readFileSync(fullPath, "utf8");
-      if (content.includes("Access-Control-Allow-Origin")) {
-        return { exists: true, hasCors: true, path: fullPath, content };
-      }
-      return { exists: true, hasCors: false, path: fullPath, content };
-    }
-  }
-
-  return { exists: false, hasCors: false, path: null, content: null };
-}
-
 module.exports = {
   detect,
   readPackageJson,
@@ -1192,8 +1144,6 @@ module.exports = {
   findCreateServer,
   detectAppVarName,
   detectDotenv,
-  detectCors,
-  detectNextJsMiddleware,
   parseEntryFromConfigFiles,
   scoreExpressFile,
 };
