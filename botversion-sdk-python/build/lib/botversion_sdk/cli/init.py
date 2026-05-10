@@ -14,7 +14,6 @@ Mirrors JS bin/init.js
 import os
 import sys
 import argparse
-from urllib.parse import urlparse 
 
 from . import detector
 from . import generator
@@ -109,9 +108,6 @@ def _ensure_sdk_installed(detected, changes, cwd):
     # ── Build list of packages to install ────────────────────────────────────
     packages_to_install = ["botversion-sdk"]
 
-    if framework == "django":
-        packages_to_install.append("django-cors-headers")
-
     # ── Install each package ──────────────────────────────────────────────────
     for package in packages_to_install:
         try:
@@ -162,7 +158,7 @@ def main():
         log()
         log("  Usage: botversion-init --key YOUR_WORKSPACE_KEY")
         log()
-        log("  Get your key from: http://localhost:3000/settings")
+        log("  Get your key from: https://botversion.com/settings")
         log()
         sys.exit(1)
 
@@ -174,7 +170,7 @@ def main():
     try:
         import urllib.request
         import json as _json
-        url = f"http://localhost:3000/api/sdk/project-info?workspaceKey={args.key}"
+        url = f"https://botversion.com/api/sdk/project-info?workspaceKey={args.key}"
         with urllib.request.urlopen(url) as response:
             project_info = _json.loads(response.read().decode())
         success(f"Project found — ID: {project_info.get('projectId')}")
@@ -405,10 +401,6 @@ def setup_fastapi(detected, args, changes, cwd):
 
     success(f"Entry point: {os.path.relpath(entry_point, cwd)}")
 
-    # ── Inject CORS ───────────────────────────────────────────────────────────────
-    step("Configuring CORS...")
-    _inject_cors_fastapi_flask(detected, changes, cwd, "fastapi")
-
     generated = generator.generate_fastapi_init(detected, args.key)
 
     # Inject init block before uvicorn.run()
@@ -476,10 +468,6 @@ def setup_flask(detected, args, changes, cwd):
             sys.exit(1)
 
     success(f"Entry point: {os.path.relpath(entry_point, cwd)}")
-
-    # ── Inject CORS ───────────────────────────────────────────────────────────────
-    step("Configuring CORS...")
-    _inject_cors_fastapi_flask(detected, changes, cwd, "flask")
 
     generated = generator.generate_flask_init(detected, args.key)
 
@@ -569,190 +557,12 @@ def setup_django(detected, args, changes, cwd):
             success("Appended botversion_sdk.init() to wsgi.py")
             changes["modified"].append(os.path.relpath(wsgi_path, cwd))
 
-    # 3. Inject CORS settings into settings.py
-    step("Configuring CORS...")
-    _inject_cors_settings(detected, changes, cwd)
-
     # ── Inject script tag into frontend file ──────────────────────────────────
     _inject_frontend_script_tag(detected, changes, cwd, args.force)
 
     # ── Ensure SDK is installed in the correct environment ────────────────────
     step("Installing SDK into backend environment...")
     _ensure_sdk_installed(detected, changes, cwd)
-
-
-# ── Inject CORS settings into Django settings.py ─────────────────────────────
-
-def _inject_cors_settings(detected, changes, cwd):
-    project_info = detected.get("project_info", {})
-
-    allowed_origins = []
-    for key in ("cdn_url", "api_url"):
-        url = project_info.get(key)
-        if url:
-            parsed = urlparse(url)
-            origin = f"{parsed.scheme}://{parsed.netloc}"
-            if origin not in allowed_origins:
-                allowed_origins.append(origin)
-
-    if not allowed_origins:
-        allowed_origins = ["http://localhost:3000"]
-
-    settings_info = detected.get("django_settings")
-    if not settings_info:
-        warn("Could not find settings.py — skipping CORS setup.")
-        changes["manual"].append(
-            "Add to your settings.py:\n\n"
-            "    INSTALLED_APPS += ['corsheaders']\n\n"
-            "    MIDDLEWARE = ['corsheaders.middleware.CorsMiddleware'] + MIDDLEWARE\n\n"
-            "    CORS_ALLOW_ALL_ORIGINS = True"
-        )
-        return
-
-    settings_path = settings_info.get("path")
-
-    try:
-        with open(settings_path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except Exception:
-        warn("Could not read settings.py — skipping CORS setup.")
-        return
-
-    # Already configured
-    if "corsheaders" in content:
-        info("CORS already configured in settings.py — skipping.")
-        return
-
-    backup = writer.backup_file(settings_path)
-    if backup:
-        changes["backups"].append(backup)
-
-    # Step 1: Add corsheaders to INSTALLED_APPS
-    result1 = writer.inject_into_installed_apps(settings_path, "corsheaders")
-
-    # Step 2: Add CorsMiddleware to top of MIDDLEWARE
-    result2 = writer.inject_into_middleware(
-        settings_path,
-        "corsheaders.middleware.CorsMiddleware"
-    )
-
-    # Step 3: Append CORS_ALLOW_ALL_ORIGINS to end of settings.py
-    try:
-        with open(settings_path, "r", encoding="utf-8") as f:
-            current_content = f.read()
-        if "CORS_ALLOWED_ORIGINS" not in current_content and "CORS_ALLOW_ALL_ORIGINS" not in current_content:
-            with open(settings_path, "a", encoding="utf-8") as f:
-                f.write(generator.generate_django_cors_settings(allowed_origins))
-    except Exception:
-        pass
-
-    if result1.get("success") or result2.get("success"):
-        success("Added CORS configuration to settings.py")
-        changes["modified"].append(os.path.relpath(settings_path, cwd))
-    else:
-        warn("Could not auto-configure CORS — add manually:")
-        changes["manual"].append(
-            "Add to your settings.py:\n\n"
-            "    INSTALLED_APPS += ['corsheaders']\n\n"
-            "    MIDDLEWARE = ['corsheaders.middleware.CorsMiddleware'] + MIDDLEWARE\n\n"
-            "    CORS_ALLOW_ALL_ORIGINS = True"
-        )
-
-
-
-def _inject_cors_fastapi_flask(detected, changes, cwd, framework):
-    entry_point = detected.get("entry_point")
-    app_var = detected.get("app_var_name", "app")
-    project_info = detected.get("project_info", {})
-    
-    allowed_origins = []
-    for key in ("cdn_url", "api_url"):
-        url = project_info.get(key)
-        if url:
-            parsed = urlparse(url)
-            origin = f"{parsed.scheme}://{parsed.netloc}"
-            if origin not in allowed_origins:
-                allowed_origins.append(origin)
-
-    if not allowed_origins:
-        allowed_origins = ["http://localhost:3000"]
-
-    if not entry_point or not os.path.exists(entry_point):
-        warn("Could not find entry point — skipping CORS setup.")
-        return
-
-    # Check if CORS already exists
-    if detector.detect_cors(entry_point, framework):
-        info("CORS already configured — skipping.")
-        return
-
-    # Generate CORS code
-    if framework == "fastapi":
-        cors_code = generator.generate_fastapi_cors(app_var, allowed_origins)
-        package = None  # FastAPI has CORSMiddleware built in
-    elif framework == "flask":
-        cors_code = generator.generate_flask_cors(app_var, allowed_origins)
-        package = "flask-cors"  # Need to install flask-cors
-    else:
-        return
-
-    # Install package if needed (Flask only)
-    if package:
-        import subprocess
-        pip_info = detected.get("pip_info")
-        if pip_info:
-            pip_cmd = pip_info["pip"]
-            try:
-                install_cmd = pip_cmd + ["install", package]
-                result = subprocess.run(
-                    install_cmd,
-                    capture_output=True,
-                    text=True,
-                    cwd=detected.get("backend_root", cwd),
-                )
-                if result.returncode == 0:
-                    success(f"{package} installed successfully")
-                else:
-                    warn(f"Could not install {package} — add manually:")
-                    changes["manual"].append(
-                        f"Install {package}:\n\n    pip install {package}"
-                    )
-            except Exception as e:
-                warn(f"Could not install {package}: {e}")
-                changes["manual"].append(
-                    f"Install {package}:\n\n    pip install {package}"
-                )
-
-    # Inject CORS code
-    result = writer.inject_cors(entry_point, cors_code, framework)
-
-    if result["success"]:
-        success(f"Added CORS configuration to {os.path.relpath(entry_point, cwd)}")
-        changes["modified"].append(os.path.relpath(entry_point, cwd))
-        if result.get("backup"):
-            changes["backups"].append(result["backup"])
-    elif result["reason"] == "already_exists":
-        info("CORS already configured — skipping.")
-    else:
-        warn("Could not auto-configure CORS — add manually:")
-        if framework == "fastapi":
-            changes["manual"].append(
-                "Add to your FastAPI entry file:\n\n"
-                "    from fastapi.middleware.cors import CORSMiddleware\n\n"
-                f"    {app_var}.add_middleware(\n"
-                "        CORSMiddleware,\n"
-                "        allow_origins=['*'],\n"
-                "        allow_credentials=True,\n"
-                "        allow_methods=['*'],\n"
-                "        allow_headers=['*'],\n"
-                "    )"
-            )
-        elif framework == "flask":
-            changes["manual"].append(
-                "Add to your Flask entry file:\n\n"
-                "    from flask_cors import CORS\n\n"
-                f"    CORS({app_var})"
-            )
 
 
 # ── Inject frontend script tag ────────────────────────────────────────────────

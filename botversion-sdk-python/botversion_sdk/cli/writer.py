@@ -549,7 +549,7 @@ def write_summary(changes):
         lines.append("")
 
     lines.append("  Next: Restart your server and test the chat widget.")
-    lines.append("  Docs: https://docs.botversion.com")
+    lines.append("  Docs: https://botversion.com/docs")
     lines.append("")
 
     return "\n".join(lines)

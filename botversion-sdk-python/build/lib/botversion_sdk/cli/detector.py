@@ -259,7 +259,8 @@ def score_django_file(content, filepath):
     if re.search(r'(test_|_test|conftest)', filename):                        score -= 10
 
     # Filename bonus
-    if filename in ('wsgi.py', 'asgi.py'):                                    score += 5
+    if filename == 'wsgi.py':                                                 score += 6
+    if filename == 'asgi.py':                                                 score += 4
     if filename == 'manage.py':                                               score += 3
     if filename == '__init__.py':                                              score += 1
 
@@ -1154,35 +1155,3 @@ def detect(cwd):
     result["pip_info"] = find_pip_executable(cwd, backend_root, virtualenv)
 
     return result
-
-
-
-def detect_cors(file_path, framework):
-    """
-    Checks if CORS is already configured in the entry file.
-    Returns True if CORS is found, False if not.
-    """
-    if not file_path or not os.path.exists(file_path):
-        return False
-
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except Exception:
-        return False
-
-    if framework == "fastapi":
-        has_import = "CORSMiddleware" in content or "fastapi.middleware.cors" in content
-        has_usage = bool(re.search(r"add_middleware\s*\(\s*CORSMiddleware", content))
-        return has_import and has_usage
-
-    if framework == "flask":
-        # Check for the import or actual usage on its own line
-        has_import = "flask_cors" in content
-        has_usage = bool(re.search(r"^\s*CORS\s*\(", content, re.MULTILINE))
-        return has_import or has_usage
-
-    if framework == "django":
-        return "corsheaders" in content
-
-    return True

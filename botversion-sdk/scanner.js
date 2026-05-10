@@ -29,14 +29,9 @@ function scanExpressRoutes(app, cwd) {
     }
   }
 
-  console.log(`\n[DEBUG] ===== JS SCAN SUMMARY =====`);
   endpoints.forEach((ep) => {
     const status = ep.requestBody ? "✅" : "❌ NULL";
-    console.log(
-      `[DEBUG] ${status} ${ep.method.padEnd(6)} ${ep.path} → ${JSON.stringify(ep.requestBody)}`,
-    );
   });
-  console.log(`[DEBUG] ================================\n`);
 
   return endpoints;
 }
@@ -51,7 +46,6 @@ function scanExpressFileStatically(filePath, seen) {
   } catch {
     return endpoints;
   }
-  console.log(`[DEBUG] Scanning file statically: ${filePath}`);
 
   // Match patterns like:
   // app.get('/path', ...)
@@ -75,10 +69,6 @@ function scanExpressFileStatically(filePath, seen) {
     const effectiveMethod = method === "ALL" ? "GET" : method;
     const needsBody = ["POST", "PUT", "PATCH"].includes(effectiveMethod);
     const bodyFields = needsBody ? extractBodyFieldsFromFile(content) : null;
-
-    console.log(
-      `[DEBUG] ${effectiveMethod} ${routePath} → bodyFields: ${JSON.stringify(bodyFields)}`,
-    );
 
     const routeParamMap = buildRouteParamMap(routePath, []);
 
@@ -133,9 +123,6 @@ function extractRoutes(stack, prefix, endpoints, seen, bodyMap) {
             const fields = extractBodyFieldsFromFile(fnStr);
             if (fields) {
               requestBody = fields;
-              console.log(
-                `[DEBUG] Found body from inline handler for ${method} ${routePath}`,
-              );
               break;
             }
           }
@@ -143,12 +130,8 @@ function extractRoutes(stack, prefix, endpoints, seen, bodyMap) {
           // Strategy 2: fall back to bodyMap using handler name
           if (!requestBody) {
             const handlerName = extractHandlerName(layer);
-            console.log(
-              `[DEBUG] ${method} ${routePath} → handlerName: ${handlerName}`,
-            );
             if (handlerName && bodyMap[handlerName]) {
               requestBody = bodyMap[handlerName];
-              console.log(`[DEBUG] Found body from bodyMap for ${handlerName}`);
             }
           }
         }
@@ -190,7 +173,6 @@ function scanNextJsRoutes(pagesDir) {
   const apiDir = path.join(pagesDir, "api");
 
   if (!fs.existsSync(apiDir)) {
-    console.warn("[BotVersion SDK] No pages/api directory found at:", apiDir);
     return endpoints;
   }
 
@@ -345,6 +327,8 @@ function inferFieldType(fieldName, content) {
     new RegExp(`${fieldName}\\s*===?\\s*(true|false)`),
     new RegExp(`(true|false)\\s*===?\\s*${fieldName}`),
     new RegExp(`Boolean\\s*\\(\\s*${fieldName}`),
+    new RegExp(`typeof\\s+${fieldName}\\s*!==?\\s*["']boolean["']`),
+    new RegExp(`typeof\\s+${fieldName}\\s*===?\\s*["']boolean["']`),
   ];
   if (boolPatterns.some((p) => p.test(content))) return "boolean";
 
@@ -411,9 +395,6 @@ function extractBodyFieldsFromFile(content) {
         ? { type: "array", items: { type: "object" } }
         : { type };
   });
-  console.log(
-    `[DEBUG] extractBodyFieldsFromFile found fields: ${JSON.stringify([...fields])}`,
-  );
 
   return { type: "object", properties };
 }
@@ -425,7 +406,6 @@ function scanNextJsAppRoutes(appDir) {
 
   const apiDir = path.join(appDir, "api");
   if (!fs.existsSync(apiDir)) {
-    console.warn("[BotVersion SDK] No app/api directory found at:", apiDir);
     return endpoints;
   }
 
@@ -710,15 +690,7 @@ function scanAllExpressFiles(cwd) {
             );
 
           if (isExpressFile) {
-            console.log(`[DEBUG] Found route file: ${fullPath}`); // already have this
             routeFiles.push(fullPath);
-          }
-
-          // ADD THIS — log files that are being SKIPPED
-          else if (/\.(js|ts)$/.test(entry)) {
-            console.log(
-              `[DEBUG] Skipped (not detected as route file): ${fullPath}`,
-            );
           }
         } catch {
           continue;
@@ -795,23 +767,6 @@ function buildBodyMap(cwd) {
         /export\s+const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{/g,
       ];
 
-      if (content.includes("req.body")) {
-        console.log(`[DEBUG] bodyMap: found req.body in ${fullPath}`);
-        console.log(
-          `[DEBUG] bodyMap: fnNames found: ${JSON.stringify([
-            ...(() => {
-              const names = new Set();
-              for (const p of fnPatterns) {
-                p.lastIndex = 0;
-                let m;
-                while ((m = p.exec(content)) !== null) names.add(m[1]);
-              }
-              return names;
-            })(),
-          ])}`,
-        );
-      }
-
       // Map every function name in this file to the whole file's body fields.
       // Brace-counting is unreliable across JS/TS variations, so we use
       // file-level field extraction here. Per-function accuracy is handled
@@ -835,7 +790,6 @@ function buildBodyMap(cwd) {
   }
 
   walk(cwd, 0);
-  console.log(`[DEBUG] bodyMap keys: ${Object.keys(bodyMap)}`);
   return bodyMap;
 }
 
@@ -932,8 +886,6 @@ function scanConfigBasedRoutes(cwd) {
       continue;
     }
 
-    console.log("[BotVersion SDK] Scanning config-based routes in:", filePath);
-
     // Pattern 1 — React Router JSX: <Route path="/:projectId/dashboard" />
     const jsxRouteMatches = content.matchAll(
       /<Route[^>]+path=["']([^"']+)["']/g,
@@ -984,12 +936,6 @@ function addConfigPattern(routePath, seen, patterns) {
   if (Object.keys(paramMap).length === 0) return;
 
   patterns.push({ pattern: normalized, params: paramMap });
-  console.log(
-    "[BotVersion SDK] Found config-based route pattern:",
-    normalized,
-    "→",
-    paramMap,
-  );
 }
 
 function scanFrontendRoutes(cwd) {
@@ -1093,12 +1039,6 @@ function scanFrontendRoutes(cwd) {
       if (Object.keys(paramMap).length === 0) return; // no dynamic params, skip static routes
 
       patterns.push({ pattern, params: paramMap });
-      console.log(
-        "[BotVersion SDK] Found frontend route pattern:",
-        pattern,
-        "→",
-        paramMap,
-      );
     });
   }
 

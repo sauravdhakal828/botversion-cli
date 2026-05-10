@@ -26,22 +26,17 @@ var BotVersion = {
       app = null;
     }
 
-    if (!options.apiKey) {
-      console.error("[BotVersion SDK] ❌ apiKey is required.");
-      return;
-    }
-
     // Restore from global if module was re-imported after hot reload
     if (global._botVersionClient) {
       this._client = global._botVersionClient;
       this._options = global._botVersionOptions;
       this._initialized = true;
-      console.warn("[BotVersion SDK] Restored from global — skipping re-init");
-      return;
-    }
-
-    if (this._initialized) {
-      console.warn("[BotVersion SDK] Already initialized — skipping");
+      // Re-attach interceptor after hot reload
+      interceptor.attachNextJsInterceptor(this._client, {
+        exclude: (global._botVersionOptions || {}).exclude || [],
+        apiPrefix: (global._botVersionOptions || {}).apiPrefix || "/api",
+        debug: (global._botVersionOptions || {}).debug || false,
+      });
       return;
     }
 
@@ -51,7 +46,7 @@ var BotVersion = {
 
     this._client = new BotVersionClient({
       apiKey: options.apiKey,
-      platformUrl: options.platformUrl || "http://localhost:3000",
+      platformUrl: options.platformUrl || "https://botversion.com",
       debug: options.debug || false,
       timeout: options.timeout || 30000,
     });
@@ -62,52 +57,21 @@ var BotVersion = {
     var self = this;
     var debug = options.debug || false;
 
-    if (debug) {
-      console.log("[BotVersion SDK] Initializing...");
-      if (app) {
-        console.log("[BotVersion SDK] Mode: Express");
-      } else {
-        console.log("[BotVersion SDK] Mode: Next.js (file-based routing)");
-      }
-    }
-
-    // ── Framework detection ──────────────────────────────────────────────────
-    if (app) {
-      var frameworkCheck = detectFramework(app);
-      if (!frameworkCheck.supported) {
-        console.error(
-          "[BotVersion SDK] ❌ Unsupported framework:",
-          frameworkCheck.name,
-        );
-        console.error(
-          "[BotVersion SDK] ❌ Currently supports Express and Next.js only.",
-        );
-        return;
-      }
-      if (debug) {
-        console.log(
-          "[BotVersion SDK] ✅ Framework detected:",
-          frameworkCheck.name,
-        );
-      }
-    }
-
-    // ── Runtime interceptor — Express only ───────────────────────────────────
+    // ── Runtime interceptor — Express or Next.js ─────────────────────────────
     if (app && app.use) {
+      // Express
       interceptor.attachInterceptor(app, self._client, {
         exclude: options.exclude || [],
         apiPrefix: options.apiPrefix || null,
         debug: debug,
       });
-      if (debug) {
-        console.log("[BotVersion SDK] ✅ Runtime interceptor attached");
-      }
-    } else if (!app) {
-      if (debug) {
-        console.log(
-          "[BotVersion SDK] ℹ Runtime interceptor skipped — Next.js mode uses file scanning only",
-        );
-      }
+    } else {
+      // Next.js — patch the global fetch/http server to intercept API calls
+      interceptor.attachNextJsInterceptor(self._client, {
+        exclude: options.exclude || [],
+        apiPrefix: options.apiPrefix || "/api",
+        debug: debug,
+      });
     }
 
     // ── Static scan ──────────────────────────────────────────────────────────
@@ -115,27 +79,12 @@ var BotVersion = {
       var endpoints = [];
 
       // Express scan
-      // Express scan
       if (app) {
-        console.log("[BotVersion SDK] Scanning Express routes...");
         var cwd = options.cwd || process.cwd();
         endpoints = scanner.scanExpressRoutes(app, cwd);
-        console.log(
-          "[BotVersion SDK] Found",
-          endpoints.length,
-          "Express routes",
-        );
-
-        if (endpoints.length === 0) {
-          console.warn("[BotVersion SDK] ⚠ No endpoints found.");
-          console.warn(
-            "[BotVersion SDK] ⚠ Make sure routes are defined BEFORE BotVersion.init()",
-          );
-        }
       }
 
       // Next.js scan
-      // Next.js scan — auto detect all possible structures
       if (!app) {
         const fs = require("fs");
         const path = require("path");
@@ -153,91 +102,32 @@ var BotVersion = {
 
         for (const dir of possibleAppDirs) {
           if (fs.existsSync(dir)) {
-            console.log("[BotVersion SDK] Scanning App Router routes at:", dir);
             const routes = scanner.scanNextJsAppRoutes(dir);
             endpoints = endpoints.concat(routes);
-            console.log(
-              "[BotVersion SDK] Found",
-              routes.length,
-              "App Router routes",
-            );
           }
         }
 
         for (const dir of possiblePagesDirs) {
           if (fs.existsSync(dir)) {
-            console.log(
-              "[BotVersion SDK] Scanning Pages Router routes at:",
-              dir,
-            );
             const routes = scanner.scanNextJsRoutes(dir);
             endpoints = endpoints.concat(routes);
-            console.log(
-              "[BotVersion SDK] Found",
-              routes.length,
-              "Pages Router routes",
-            );
           }
         }
       }
 
-      // Neither Express nor pagesDir
-      // Neither Express nor Next.js routes found
-      if (!app && endpoints.length === 0) {
-        console.error(
-          "[BotVersion SDK] ❌ No routes found. Make sure your app/api or pages/api folder exists.",
-        );
-        return;
-      }
-
       // Send to platform
       if (endpoints.length > 0) {
-        console.log(
-          "[BotVersion SDK] Sending",
-          endpoints.length,
-          "endpoints to platform...",
-        );
-        self._client
-          .registerEndpoints(endpoints)
-          .then(function () {
-            console.log(
-              "[BotVersion SDK] ✅ Endpoints queued —",
-              endpoints.length,
-              "endpoints will be sent shortly",
-            );
-          })
-          .catch(function (err) {
-            console.error(
-              "[BotVersion SDK] ❌ Failed to register endpoints:",
-              err.message,
-            );
-          });
+        self._client.registerEndpoints(endpoints);
       }
 
       var routePatterns = scanner.scanFrontendRoutes(
         options.cwd || process.cwd(),
       );
       if (routePatterns.length > 0) {
-        console.log(
-          "[BotVersion SDK] Found",
-          routePatterns.length,
-          "frontend route patterns",
-        );
         self._client
           .registerRoutePatterns(routePatterns)
-          .then(function () {
-            console.log("[BotVersion SDK] ✅ Route patterns registered");
-          })
-          .catch(function (err) {
-            console.error(
-              "[BotVersion SDK] ❌ Failed to register route patterns:",
-              err.message,
-            );
-          });
+          .catch(function (err) {});
       }
-
-      self._client.connect();
-      console.log("[BotVersion SDK] ✅ Initialization complete");
     }, 500);
   },
 
@@ -270,36 +160,3 @@ module.exports.default = BotVersion;
 module.exports.init = BotVersion.init;
 module.exports.getEndpoints = BotVersion.getEndpoints;
 module.exports.registerEndpoint = BotVersion.registerEndpoint;
-
-// ── Framework detection ──────────────────────────────────────────────────────
-function detectFramework(app) {
-  if (!app) return { supported: false, name: "unknown (no app passed)" };
-
-  var isExpress =
-    typeof app.use === "function" &&
-    typeof app.get === "function" &&
-    typeof app.post === "function" &&
-    (app._router !== undefined ||
-      app.stack !== undefined ||
-      app.lazyrouter !== undefined);
-
-  if (isExpress) return { supported: true, name: "Express" };
-
-  if (typeof app.addHook === "function" && typeof app.route === "function") {
-    return { supported: false, name: "Fastify" };
-  }
-
-  if (
-    typeof app.use === "function" &&
-    app.context !== undefined &&
-    typeof app.get !== "function"
-  ) {
-    return { supported: false, name: "Koa" };
-  }
-
-  if (typeof app.route === "function" && typeof app.start === "function") {
-    return { supported: false, name: "Hapi" };
-  }
-
-  return { supported: false, name: "unknown" };
-}

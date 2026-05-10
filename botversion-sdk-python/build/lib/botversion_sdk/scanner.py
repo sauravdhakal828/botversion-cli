@@ -14,13 +14,6 @@ def scan_routes(app, framework):
     elif framework == "django":
         result = scan_django_routes()
 
-    # ADD THIS
-    print(f"\n[DEBUG] ===== SCAN SUMMARY =====")
-    for ep in result:
-        status = "✅" if ep.get("requestBody") else "❌ NULL"
-        print(f"[DEBUG] {status} {ep['method']:6} {ep['path']} → {ep.get('requestBody')}")
-    print(f"[DEBUG] ==========================\n")
-
     return result
 
 
@@ -64,8 +57,8 @@ def scan_fastapi_routes(app):
                     "detectedBy": "static-scan",
                 })
 
-    except Exception as e:
-        print(f"[BotVersion SDK] ⚠ FastAPI scan error: {e}")
+    except Exception:
+        pass
 
     return endpoints
 
@@ -76,12 +69,19 @@ def scan_flask_routes(app):
     endpoints = []
     seen = set()
 
+    SKIP_PREFIXES = ("/swaggerui", "/static", "/_")
+    SKIP_EXACT = ("/swagger.json", "/redoc", "/openapi.json", "/docs", "/favicon.ico")
+
     try:
         for rule in app.url_map.iter_rules():
-            # Skip static and internal Flask routes
+            # Skip Flask internal static routes
             if rule.endpoint == "static":
                 continue
-            if rule.rule.startswith("/static"):
+
+            # Skip common documentation/UI routes
+            if any(rule.rule.startswith(p) for p in SKIP_PREFIXES):
+                continue
+            if rule.rule in SKIP_EXACT:
                 continue
 
             # Normalize Flask path format <int:id> → :id
@@ -104,12 +104,16 @@ def scan_flask_routes(app):
                     "method": method,
                     "path": path,
                     "description": generate_description(method, path, handler_name),
-                    "requestBody": extract_flask_schema(handler_fn, method) or (build_param_schema(params) if method != "GET" and params else None),
+                    "requestBody": (
+                        extract_flask_schema(handler_fn, method) or
+                        extract_restx_resource_schema(app, rule, method) or
+                        (build_param_schema(params) if method != "GET" and params else None)
+                    ),
                     "detectedBy": "static-scan",
                 })
 
-    except Exception as e:
-        print(f"[BotVersion SDK] ⚠ Flask scan error: {e}")
+    except Exception:
+        pass
 
     return endpoints
 
@@ -138,8 +142,8 @@ def scan_django_routes():
 
         resolver = get_resolver()
         _walk_django_patterns(resolver.url_patterns, "", endpoints, seen)
-    except Exception as e:
-        print(f"[BotVersion SDK] ⚠ Django scan error: {e}")
+    except Exception:
+        pass
 
     return endpoints
 
@@ -208,11 +212,10 @@ def extract_drf_schema(callback, method):
         if required:
             result["required"] = required
 
-        print(f"[BotVersion SDK] ✅ DRF schema extracted for {method}: {list(properties.keys())}")
         return result
 
-    except Exception as e:
-        print(f"[BotVersion SDK] ⚠ DRF schema extraction failed: {e}")
+    except Exception:
+        pass
 
     # Strategy 2 — request.data / request.POST pattern
     try:
@@ -286,12 +289,10 @@ def extract_flask_schema(view_func, method):
     """
     if method.upper() == "GET":
         return None
-    
-    print(f"\n[DEBUG] >>> extract_flask_schema: {method} handler={getattr(view_func, '__name__', '?')}")
-    print(f"[DEBUG] has __apidoc__: {hasattr(view_func, '__apidoc__')}")
-    print(f"[DEBUG] has _schema: {hasattr(view_func, '_schema')}")
-    print(f"[DEBUG] has view_class: {hasattr(view_func, 'view_class')}")
-    print(f"[DEBUG] type hints: {typing.get_type_hints(view_func) if callable(view_func) else 'N/A'}")
+    try:
+        hints = typing.get_type_hints(view_func) if callable(view_func) else {}
+    except Exception:
+        pass
 
     try:
         # ── 1. Flask-RESTX / Flask-RESTPlus ──────────────────────────────
@@ -315,7 +316,6 @@ def extract_flask_schema(view_func, method):
                         result = {"type": "object", "properties": properties}
                         if required:
                             result["required"] = required
-                        print(f"[BotVersion SDK] ✅ Flask-RESTX schema extracted: {list(properties.keys())}")
                         return result
 
         # ── 2. Marshmallow schema ─────────────────────────────────────────
@@ -328,7 +328,6 @@ def extract_flask_schema(view_func, method):
         if schema is not None:
             marshmallow_result = _extract_marshmallow_schema(schema)
             if marshmallow_result:
-                print(f"[BotVersion SDK] ✅ Marshmallow schema extracted from view: {list(marshmallow_result.get('properties', {}).keys())}")
                 return marshmallow_result
 
         # ── 3. Flask-RESTX MethodView / Resource ─────────────────────────
@@ -345,7 +344,6 @@ def extract_flask_schema(view_func, method):
                 if schema:
                     marshmallow_result = _extract_marshmallow_schema(schema)
                     if marshmallow_result:
-                        print(f"[BotVersion SDK] ✅ Marshmallow schema extracted from method: {list(marshmallow_result.get('properties', {}).keys())}")
                         return marshmallow_result
 
                 # Check for RESTX expect decorator
@@ -374,15 +372,13 @@ def extract_flask_schema(view_func, method):
         pydantic_model = getattr(view_func, "_pydantic_model", None)
         if pydantic_model and hasattr(pydantic_model, "model_json_schema"):
             schema = pydantic_model.model_json_schema()
-            print(f"[BotVersion SDK] ✅ Pydantic schema extracted from Flask view")
             return schema
         if pydantic_model and hasattr(pydantic_model, "schema"):
             schema = pydantic_model.schema()
-            print(f"[BotVersion SDK] ✅ Pydantic v1 schema extracted from Flask view")
             return schema
 
-    except Exception as e:
-        print(f"[BotVersion SDK] ⚠ Flask schema extraction failed: {e}")
+    except Exception:
+        pass
 
     # Strategy 5 — plain request.json / request.get_json() / request.form pattern
     try:
@@ -416,6 +412,59 @@ def extract_flask_schema(view_func, method):
         pass
 
     return None
+
+
+
+def extract_restx_resource_schema(app, rule, method):
+    """
+    Handles Flask-RESTX Resource classes.
+    Flask-RESTX stores schema info on the Resource class method,
+    not on the Flask view function.
+    """
+    try:
+        handler_fn = app.view_functions.get(rule.endpoint)
+        if not handler_fn:
+            return None
+
+        # Flask-RESTX attaches the Resource class as view_class
+        view_class = getattr(handler_fn, "view_class", None)
+        if not view_class:
+            return None
+
+        # Get the actual method e.g. Register.post
+        method_fn = getattr(view_class, method.lower(), None)
+        if not method_fn:
+            return None
+
+        # @rest_api.expect() stores info in __apidoc__
+        apidoc = getattr(method_fn, "__apidoc__", None)
+        if not apidoc:
+            return None
+
+        # Flask-RESTX uses "expect" key (not "expects")
+        expects = apidoc.get("expect", [])
+        for expect_entry in expects:
+            model = expect_entry[0] if isinstance(expect_entry, (list, tuple)) else expect_entry
+            if hasattr(model, "resolved"):
+                properties = {}
+                required = []
+                for field_name, field in model.resolved.items():
+                    properties[field_name] = {
+                        "type": _restx_field_to_json_type(field),
+                        "description": field_name.replace("_", " ").title(),
+                    }
+                    if getattr(field, "required", False):
+                        required.append(field_name)
+                if properties:
+                    result = {"type": "object", "properties": properties}
+                    if required:
+                        result["required"] = required
+                    return result
+
+    except Exception:
+        pass
+    return None
+
 
 
 def _extract_marshmallow_schema(schema):
@@ -460,7 +509,6 @@ def _extract_marshmallow_schema(schema):
     except ImportError:
         return None
     except Exception as e:
-        print(f"[BotVersion SDK] ⚠ Marshmallow extraction failed: {e}")
         return None
 
 
@@ -506,12 +554,10 @@ def _walk_django_patterns(patterns, prefix, endpoints, seen):
     for pattern in patterns:
         if isinstance(pattern, URLResolver):
             sub_prefix = join_paths(prefix, _django_pattern_to_path(str(pattern.pattern)))
-            print(f"[BotVersion SDK] 📁 resolver: '{str(pattern.pattern)}' → prefix: '{sub_prefix}'")
             _walk_django_patterns(pattern.url_patterns, sub_prefix, endpoints, seen)
 
         elif isinstance(pattern, URLPattern):
             path = join_paths(prefix, _django_pattern_to_path(str(pattern.pattern)))
-            print(f"[BotVersion SDK] 🔍 endpoint: '{str(pattern.pattern)}' → path: '{path}'")
             methods = _detect_django_methods(pattern.callback)
             handler_name = getattr(pattern.callback, "__name__", None)
 
@@ -608,6 +654,8 @@ def infer_field_type(field_name, source_code):
         rf"int\s*\(\s*{field_name}\s*\)",
         rf"float\s*\(\s*{field_name}\s*\)",
         rf"isinstance\s*\(\s*{field_name}\s*,\s*(int|float)\s*\)",
+        rf"not\s+isinstance\s*\(\s*{field_name}\s*,\s*(int|float)\s*\)",
+        rf"type\s*\(\s*{field_name}\s*\)\s*is\s*(not\s+)?(int|float)",
     ]
     if any(re.search(p, source_code) for p in number_patterns):
         return "number"
@@ -618,6 +666,8 @@ def infer_field_type(field_name, source_code):
         rf"(True|False)\s*==\s*{field_name}",
         rf"isinstance\s*\(\s*{field_name}\s*,\s*bool\s*\)",
         rf"bool\s*\(\s*{field_name}\s*\)",
+        rf"type\s*\(\s*{field_name}\s*\)\s*is\s*(not\s+)?bool",
+        rf"not\s+isinstance\s*\(\s*{field_name}\s*,\s*bool\s*\)",
     ]
     if any(re.search(p, source_code) for p in bool_patterns):
         return "boolean"
@@ -673,18 +723,14 @@ def extract_request_body_schema(route, method):
     if method not in ("POST", "PUT", "PATCH"):
         return None
 
-    print(f"\n[DEBUG] >>> extract_request_body_schema called: {method} {getattr(route, 'path', '?')}")
-
     try:
         # path param names — we must exclude these from body
         path_param_names = set()
         if hasattr(route, "dependant") and hasattr(route.dependant, "path_params"):
             path_param_names = {f.name for f in route.dependant.path_params}
-        print(f"[DEBUG] path_param_names to exclude: {path_param_names}")
 
         # Strategy 1: route.dependant.body_params
         if hasattr(route, "dependant") and route.dependant.body_params:
-            print(f"[DEBUG] body_params found: {[f.name for f in route.dependant.body_params]}")
             properties = {}
             required = []
 
@@ -693,7 +739,6 @@ def extract_request_body_schema(route, method):
 
                 # Skip path params — they are NOT body fields
                 if field_name in path_param_names:
-                    print(f"[DEBUG] Skipping path param: {field_name}")
                     continue
 
                 annotation = None
@@ -703,8 +748,6 @@ def extract_request_body_schema(route, method):
                     annotation = field.outer_type_
                 if annotation is None:
                     annotation = getattr(field, "type_", None)
-
-                print(f"[DEBUG] Field: {field_name}, annotation: {annotation}")
 
                 if annotation and hasattr(annotation, "model_json_schema"):
                     schema = annotation.model_json_schema()
@@ -763,10 +806,8 @@ def extract_request_body_schema(route, method):
                     result["required"] = list(set(required))
                 return result
 
-    except Exception as e:
-        print(f"[DEBUG] EXCEPTION: {e}")
-
-    print(f"[DEBUG] <<< returning None for {method} {getattr(route, 'path', '?')}")
+    except Exception:
+        pass
     return None
 
 
@@ -861,7 +902,6 @@ def _walk_frontend_dir(directory, segments, patterns, seen):
                 continue  # skip static routes with no dynamic params
 
             patterns.append({"pattern": pattern, "params": param_map})
-            print(f"[BotVersion SDK] Found frontend route pattern: {pattern} → {param_map}")
 
 
 
@@ -921,8 +961,6 @@ def _scan_config_based_routes(cwd):
         except OSError:
             continue
 
-        print(f"[BotVersion SDK] Scanning config-based routes in: {file_path}")
-
         # React Router JSX: <Route path="/:projectId/dashboard" />
         for match in re.finditer(r'<Route[^>]+path=["\']([^"\']+)["\']', content):
             _add_config_pattern(match.group(1), seen, patterns)
@@ -959,4 +997,3 @@ def _add_config_pattern(route_path, seen, patterns):
         return
 
     patterns.append({"pattern": normalized, "params": param_map})
-    print(f"[BotVersion SDK] Found config-based route pattern: {normalized} → {param_map}")

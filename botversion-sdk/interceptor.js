@@ -1,109 +1,7 @@
 // botversion-sdk/interceptor.js
 "use strict";
 
-/**
- * Makes an internal HTTP request to the user's own backend.
- * Forwards cookies, auth headers, and CSRF tokens.
- */
-function makeInternalRequest(method, path, body, cookies, headers, baseUrl) {
-  return new Promise(function (resolve) {
-    var http = require("http");
-    var https = require("https");
-    var url = require("url");
-
-    baseUrl = baseUrl || "http://127.0.0.1:8000";
-    var fullUrl = baseUrl + path;
-    var parsedUrl = url.parse(fullUrl);
-    var isHttps = parsedUrl.protocol === "https:";
-    var lib = isHttps ? https : http;
-
-    var bodyStr = body ? JSON.stringify(body) : null;
-
-    var reqHeaders = {
-      "Content-Type": "application/json",
-    };
-
-    if (bodyStr) {
-      reqHeaders["Content-Length"] = String(Buffer.byteLength(bodyStr));
-    }
-
-    // Forward cookies — this is what identifies the user
-    if (cookies) reqHeaders["Cookie"] = cookies;
-
-    // Forward auth header
-    var authHeader =
-      headers && (headers["authorization"] || headers["Authorization"]);
-    if (authHeader) reqHeaders["Authorization"] = authHeader;
-
-    // Forward CSRF token
-    var csrf =
-      headers &&
-      (headers["x-csrftoken"] ||
-        headers["X-CSRFToken"] ||
-        headers["x-xsrf-token"] ||
-        headers["X-XSRF-TOKEN"]);
-    if (csrf) reqHeaders["X-CSRFToken"] = csrf;
-
-    var reqOptions = {
-      hostname: parsedUrl.hostname,
-      port: parsedUrl.port || (isHttps ? 443 : 80),
-      path: parsedUrl.path,
-      method: method.toUpperCase(),
-      headers: reqHeaders,
-      timeout: 30000,
-    };
-
-    var req = lib.request(reqOptions, function (res) {
-      var data = "";
-      res.on("data", function (chunk) {
-        data += chunk;
-      });
-      res.on("end", function () {
-        var parsed;
-        try {
-          parsed = JSON.parse(data);
-        } catch (e) {
-          parsed = { raw: data };
-        }
-
-        // Handle redirects
-        if (
-          res.statusCode >= 300 &&
-          res.statusCode < 400 &&
-          res.headers.location
-        ) {
-          makeInternalRequest(
-            res.statusCode === 303 ? "GET" : method,
-            res.headers.location,
-            res.statusCode === 303 ? null : body,
-            cookies,
-            headers,
-            baseUrl,
-          ).then(resolve);
-          return;
-        }
-
-        resolve({
-          status: res.statusCode,
-          ok: res.statusCode >= 200 && res.statusCode < 300,
-          data: parsed,
-        });
-      });
-    });
-
-    req.on("error", function (err) {
-      resolve({ status: 500, ok: false, data: { error: err.message } });
-    });
-
-    req.on("timeout", function () {
-      req.destroy();
-      resolve({ status: 500, ok: false, data: { error: "Request timed out" } });
-    });
-
-    if (bodyStr) req.write(bodyStr);
-    req.end();
-  });
-}
+const reportedEndpoints = new Set();
 
 /**
  * Attaches a middleware to the Express app that
@@ -121,9 +19,6 @@ function attachInterceptor(app, client, options) {
     "/static",
     "/public",
   ].concat(options.exclude || []);
-
-  // Track which endpoints we have already reported
-  const reportedEndpoints = new Set();
 
   app.use(function botVersionInterceptor(req, res, next) {
     const path = req.path || req.url || "";
@@ -183,21 +78,12 @@ function attachInterceptor(app, client, options) {
             detectedBy: "runtime",
           })
           .catch(function (err) {
-            if (options.debug) {
-              console.warn(
-                "[BotVersion SDK] Failed to report endpoint:",
-                err.message,
-              );
-            }
+            console.error("[botversion] update_endpoint failed:", err.message);
           });
       });
     }
 
     next();
-  });
-  // Register executor so WebSocket can forward calls to user's backend
-  client.setExecutor(function (method, path, body, cookies, headers, baseUrl) {
-    return makeInternalRequest(method, path, body, cookies, headers, baseUrl);
   });
 }
 
@@ -286,8 +172,59 @@ function buildBodyStructure(body) {
   return structure;
 }
 
+function attachNextJsInterceptor(client, options) {
+  try {
+    const http = require("http");
+    const originalEmit = http.Server.prototype.emit;
+
+    http.Server.prototype.emit = function (event, req, res) {
+      if (event === "request") {
+        const path = req.url ? req.url.split("?")[0] : "";
+        const method = req.method ? req.method.toUpperCase() : "";
+
+        const shouldIgnore = (options.exclude || [])
+          .concat(["/health", "/favicon.ico", "/_next", "/static", "/public"])
+          .some(function (p) {
+            return path.startsWith(p);
+          });
+
+        const isApiPath = path.startsWith(options.apiPrefix || "/api");
+
+        if (!shouldIgnore && isApiPath) {
+          const normalizedPath = normalizePath(path);
+          const endpointKey = method + ":" + normalizedPath;
+
+          if (!reportedEndpoints.has(endpointKey)) {
+            reportedEndpoints.add(endpointKey);
+
+            setImmediate(function () {
+              client
+                .updateEndpoint({
+                  method: method,
+                  path: normalizedPath,
+                  detectedBy: "runtime",
+                })
+                .catch(function (err) {
+                  console.error("[botversion] update failed:", err.message);
+                });
+            });
+          }
+        }
+      }
+
+      return originalEmit.apply(this, arguments);
+    };
+  } catch (err) {
+    console.error(
+      "[botversion] failed to attach Next.js interceptor:",
+      err.message,
+    );
+  }
+}
+
 module.exports = {
   attachInterceptor,
+  attachNextJsInterceptor,
   normalizePath,
   buildBodyStructure,
 };

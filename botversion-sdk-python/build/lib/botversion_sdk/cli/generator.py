@@ -67,7 +67,7 @@ def generate_fastapi_init(info, api_key):
 botversion_sdk.init(
     {app_var},
     api_key=os.environ.get("BOTVERSION_API_KEY"),
-    platform_url=os.environ.get("BOTVERSION_PLATFORM_URL", "https://app.botversion.com"),
+    platform_url=os.environ.get("BOTVERSION_PLATFORM_URL", "https://botversion.com"),
     routes_dir={routes_dir},
 )
 """
@@ -90,7 +90,7 @@ def generate_flask_init(info, api_key):
 botversion_sdk.init(
     {app_var},
     api_key=os.environ.get("BOTVERSION_API_KEY"),
-    platform_url=os.environ.get("BOTVERSION_PLATFORM_URL", "https://app.botversion.com"),
+    platform_url=os.environ.get("BOTVERSION_PLATFORM_URL", "https://botversion.com"),
     routes_dir={routes_dir},
 )
 """
@@ -111,7 +111,7 @@ import botversion_sdk
 
 botversion_sdk.init(
     api_key=os.environ.get("BOTVERSION_API_KEY"),
-    platform_url=os.environ.get("BOTVERSION_PLATFORM_URL", "https://app.botversion.com"),
+    platform_url=os.environ.get("BOTVERSION_PLATFORM_URL", "https://botversion.com"),
     routes_dir={routes_dir},
 )
 """.strip()
@@ -130,7 +130,7 @@ Tornado support is coming soon. For now, add this manually:
     # After defining your handlers:
     botversion_sdk.init(api_key=os.environ.get("BOTVERSION_API_KEY"))
 
-    # See: https://docs.botversion.com/tornado
+    # See: https://botversion.com/docs
 """,
         "aiohttp": f"""
 aiohttp support is coming soon. For now, add this manually:
@@ -140,7 +140,7 @@ aiohttp support is coming soon. For now, add this manually:
 
     botversion_sdk.init(api_key=os.environ.get("BOTVERSION_API_KEY"))
 
-    # See: https://docs.botversion.com/aiohttp
+    # See: https://botversion.com/docs
 """,
         "sanic": f"""
 Sanic support is coming soon. For now, add this manually:
@@ -150,7 +150,7 @@ Sanic support is coming soon. For now, add this manually:
 
     botversion_sdk.init(app, api_key=os.environ.get("BOTVERSION_API_KEY"))
 
-    # See: https://docs.botversion.com/sanic
+    # See: https://botversion.com/docs
 """,
     }
 
@@ -158,43 +158,8 @@ Sanic support is coming soon. For now, add this manually:
         framework,
         """
 This framework is not yet supported automatically.
-Visit https://docs.botversion.com for manual setup instructions.
+Visit https://botversion.com/docs for manual setup instructions.
 """
-    )
-
-
-# ── CORS generation ───────────────────────────────────────────────────────────
-
-def generate_fastapi_cors(app_var, allowed_origins):
-    return f"""# CORS — auto-added by BotVersion init
-from fastapi.middleware.cors import CORSMiddleware
-
-{app_var}.add_middleware(
-    CORSMiddleware,
-    allow_origins={repr(allowed_origins)},
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)""".strip()
-
-
-def generate_flask_cors(app_var, allowed_origins):
-    return f"""# CORS — auto-added by BotVersion init
-from flask_cors import CORS
-
-CORS({app_var}, origins={repr(allowed_origins)})""".strip()
-
-
-def generate_django_cors_settings(allowed_origins):
-    return f"\n# BotVersion — only allow requests from BotVersion platform\nCORS_ALLOWED_ORIGINS = {repr(allowed_origins)}\n"
-
-
-def generate_django_cors_manual_instructions():
-    return (
-        "Add to your settings.py:\n\n"
-        "    INSTALLED_APPS += ['corsheaders']\n\n"
-        "    MIDDLEWARE = ['corsheaders.middleware.CorsMiddleware'] + MIDDLEWARE\n\n"
-        "    CORS_ALLOWED_ORIGINS = ['http://localhost:3000']"
     )
 
 

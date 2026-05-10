@@ -3,79 +3,6 @@ import re
 import json
 import threading
 
-def make_internal_request(method, path, body, cookies, headers, base_url="http://127.0.0.1:8000"):
-    """
-    Makes an internal HTTP request to the user's own backend.
-    Forwards cookies so the backend identifies the user correctly.
-    Works for all auth types — JWT, session, cookie-based.
-    """
-    import urllib.request
-    import urllib.error
-    import json
-
-    # Build the full URL — calling the user's own backend internally
-    url = f"{base_url}{path}"
-
-    body_bytes = json.dumps(body).encode("utf-8") if body else None
-
-    req = urllib.request.Request(
-        url,
-        data=body_bytes,
-        method=method.upper(),
-    )
-
-    # Forward all original headers
-    req.add_header("Content-Type", "application/json")
-
-    # Forward cookies — this is what identifies the user
-    if cookies:
-        req.add_header("Cookie", cookies)
-
-    # Forward auth header if present
-    auth_header = headers.get("authorization") or headers.get("Authorization")
-    if auth_header:
-        req.add_header("Authorization", auth_header)
-
-    # Forward CSRF token if present
-    csrf = (
-        headers.get("x-csrftoken")
-        or headers.get("X-CSRFToken")
-        or headers.get("x-xsrf-token")
-        or headers.get("X-XSRF-TOKEN")
-    )
-    if csrf:
-        req.add_header("X-CSRFToken", csrf)
-
-    try:
-        with urllib.request.urlopen(req, timeout=30) as res:
-            raw = res.read().decode("utf-8")
-            try:
-                data = json.loads(raw)
-            except Exception:
-                data = {"raw": raw}
-            return {
-                "status": res.status,
-                "ok": 200 <= res.status < 300,
-                "data": data,
-            }
-    except urllib.error.HTTPError as e:
-        raw = e.read().decode("utf-8")
-        try:
-            data = json.loads(raw)
-        except Exception:
-            data = {"error": raw}
-        return {
-            "status": e.code,
-            "ok": False,
-            "data": data,
-        }
-    except Exception as e:
-        return {
-            "status": 500,
-            "ok": False,
-            "data": {"error": str(e)},
-        }
-
 # Paths to always ignore
 IGNORE_PATHS = [
     "/health",
@@ -199,9 +126,8 @@ def report_endpoint(client, method, path, body_structure, options):
                 "request_body": json_schema,
                 "detected_by": "runtime",
             })
-        except Exception as e:
-            if options.get("debug"):
-                print(f"[BotVersion SDK] ⚠ Failed to report endpoint: {e}")
+        except Exception:
+            pass
 
     t = threading.Thread(target=_send, daemon=True)
     t.start()
@@ -238,16 +164,8 @@ def attach_fastapi_interceptor(app, client, options):
 
         app.add_middleware(BotVersionMiddleware)
 
-        if options.get("debug"):
-            print("[BotVersion SDK] ✅ FastAPI middleware attached")
-
-        # Register executor so WebSocket can make internal calls
-        client.set_executor(lambda method, path, body, cookies, headers, base_url:
-            make_internal_request(method, path, body, cookies, headers, base_url)
-        )
-
     except ImportError:
-        print("[BotVersion SDK] ❌ starlette not found — cannot attach FastAPI middleware")
+        pass
 
 
 # ── Flask middleware ──────────────────────────────────────────────────────────
@@ -273,15 +191,8 @@ def attach_flask_interceptor(app, client, options):
 
             report_endpoint(client, method, path, body_structure, options)
 
-        if options.get("debug"):
-            print("[BotVersion SDK] ✅ Flask interceptor attached")
-
-        client.set_executor(lambda method, path, body, cookies, headers, base_url:
-            make_internal_request(method, path, body, cookies, headers, base_url)
-        )
-
     except ImportError:
-        print("[BotVersion SDK] ❌ Flask not found — cannot attach interceptor")
+        pass
 
 
 # ── Django middleware ─────────────────────────────────────────────────────────
@@ -336,14 +247,8 @@ def attach_django_interceptor(client, options):
             else:
                 settings.MIDDLEWARE.insert(0, middleware_path)
 
-        if options.get("debug"):
-            print("[BotVersion SDK] ✅ Django middleware attached")
-
         BotVersionDjangoMiddleware._client = client
         BotVersionDjangoMiddleware._options = options
-        client.set_executor(lambda method, path, body, cookies, headers, base_url:
-            make_internal_request(method, path, body, cookies, headers, base_url)
-        )
 
     except ImportError:
-        print("[BotVersion SDK] ❌ Django not found — cannot attach middleware")
+        pass

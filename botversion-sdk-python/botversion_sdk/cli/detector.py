@@ -259,7 +259,8 @@ def score_django_file(content, filepath):
     if re.search(r'(test_|_test|conftest)', filename):                        score -= 10
 
     # Filename bonus
-    if filename in ('wsgi.py', 'asgi.py'):                                    score += 5
+    if filename == 'wsgi.py':                                                 score += 6
+    if filename == 'asgi.py':                                                 score += 4
     if filename == 'manage.py':                                               score += 3
     if filename == '__init__.py':                                              score += 1
 

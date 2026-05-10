@@ -8,9 +8,7 @@ version = "1.0.3"
 description = "BotVersion AI Agent SDK for FastAPI, Flask, and Django"
 authors = [{name = "Saurav Dhakal", email = "sauravdhakal828@gmail.com"}]
 requires-python = ">=3.8"
-dependencies = [
-  "websocket-client>=1.0.0"
-]
+dependencies = []
 
 [project.scripts]
 botversion-init = "botversion_sdk.cli.init:main"

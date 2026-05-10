@@ -36,20 +36,11 @@ def init(app=None, api_key=None, **options):
     """
     global _initialized, _client, _options, _app
 
-    if not api_key:
-        print("[BotVersion SDK] ❌ api_key is required.")
-        return
-
     # Restore from builtins if module was re-imported after hot reload
     if getattr(builtins, "_botversion_client", None):
         _client = builtins._botversion_client
         _options = builtins._botversion_options
         _initialized = True
-        print("[BotVersion SDK] Restored from builtins — skipping re-init")
-        return
-
-    if _initialized:
-        print("[BotVersion SDK] ⚠ Already initialized — skipping")
         return
 
     _initialized = True
@@ -63,14 +54,12 @@ def init(app=None, api_key=None, **options):
     framework = _detect_framework(app)
 
     if not framework:
-        print("[BotVersion SDK] ❌ Could not detect framework.")
-        print("[BotVersion SDK] ❌ Make sure FastAPI, Flask, or Django is installed.")
         _initialized = False
         return
 
     _client = BotVersionClient({
         "api_key": api_key,
-        "platform_url": options.get("platform_url", "http://localhost:3000"),
+        "platform_url": options.get("platform_url", "https://botversion.com"),
         "debug": debug,
         "timeout": options.get("timeout", 30),
         "flush_delay": options.get("flush_delay", 3),
@@ -79,9 +68,6 @@ def init(app=None, api_key=None, **options):
     # Store globally so hot-reload can restore state
     builtins._botversion_client = _client
     builtins._botversion_options = _options
-
-    if debug:
-        print(f"[BotVersion SDK] ✅ Framework detected: {framework}")
 
     interceptor_options = {
         "exclude": options.get("exclude", []),
@@ -97,11 +83,7 @@ def init(app=None, api_key=None, **options):
     elif framework == "django":
         attach_django_interceptor(_client, interceptor_options)
     else:
-        print(f"[BotVersion SDK] ❌ Unsupported framework: {framework}")
         return
-
-    if debug:
-        print("[BotVersion SDK] ✅ Runtime interceptor attached")
 
     # ── Static scan (delayed 500ms — let app finish registering routes) ──────
     def _run_scan():
@@ -109,37 +91,18 @@ def init(app=None, api_key=None, **options):
             endpoints = []
 
             if app is not None:
-                print(f"[BotVersion SDK] Scanning {framework} routes...")
                 endpoints = scan_routes(app, framework)
-                print(f"[BotVersion SDK] Found {len(endpoints)} {framework} routes")
-
-                if debug:
-                    import json
-                    print(f"[BotVersion SDK] Endpoints: {json.dumps(endpoints, indent=2)}")
-
-                if len(endpoints) == 0:
-                    print("[BotVersion SDK] ⚠ No endpoints found.")
-                    print("[BotVersion SDK] ⚠ Make sure routes are defined BEFORE botversion_sdk.init()")
 
             elif framework == "django":
-                print("[BotVersion SDK] Scanning Django routes...")
                 endpoints = scan_routes(None, "django")
-                print(f"[BotVersion SDK] Found {len(endpoints)} Django routes")
 
-                if len(endpoints) == 0:
-                    print("[BotVersion SDK] ⚠ No Django routes found.")
-                    print("[BotVersion SDK] ⚠ Make sure botversion_sdk.init() is called AFTER Django is fully loaded.")
             else:
-                print("[BotVersion SDK] ❌ No routes to scan.")
                 return
 
             if endpoints:
-                print(f"[BotVersion SDK] Sending {len(endpoints)} endpoints to platform...")
                 _client.register_endpoints_now(endpoints)
-                print(f"[BotVersion SDK] ✅ Static scan complete — {len(endpoints)} endpoints registered")
 
         except Exception as e:
-            print(f"[BotVersion SDK] ❌ Scan error: {e}")
             if debug:
                 import traceback
                 traceback.print_exc()
@@ -147,17 +110,33 @@ def init(app=None, api_key=None, **options):
         cwd = options.get("cwd", os.getcwd())
         route_patterns = scan_frontend_routes(cwd)
         if route_patterns:
-            print(f"[BotVersion SDK] Found {len(route_patterns)} frontend route patterns")
             _client.register_route_patterns(route_patterns)
-            print("[BotVersion SDK] ✅ Route patterns registered")
 
-        _client.connect()
+    if framework == "flask":
+        @app.after_request
+        def _botversion_first_scan(response):
+            if not getattr(app, '_botversion_scanned', False):
+                app._botversion_scanned = True
+                threading.Thread(target=_run_scan, daemon=True).start()
+            return response
 
-        print("[BotVersion SDK] ✅ Initialization complete")
+    elif framework == "fastapi":
+        @app.middleware("http")
+        async def _botversion_first_scan(request, call_next):
+            if not getattr(app, '_botversion_scanned', False):
+                app._botversion_scanned = True
+                threading.Thread(target=_run_scan, daemon=True).start()
+            return await call_next(request)
 
-    t = threading.Timer(0.5, _run_scan)
-    t.daemon = True
-    t.start()
+    elif framework == "django":
+        try:
+            from django.apps import apps
+            if apps.ready:
+                threading.Thread(target=_run_scan, daemon=True).start()
+        except Exception:
+            t = threading.Timer(2.0, _run_scan)
+            t.daemon = True
+            t.start()
 
 
 def get_endpoints():
