@@ -959,6 +959,11 @@ function scanFrontendRoutes(cwd) {
     // Remix
     path.join(cwd, "app", "routes"),
   ];
+  console.log("[botversion:scanner] scanFrontendRoutes called with cwd:", cwd);
+  console.log("[botversion:scanner] Directories to check:");
+  dirsToScan.forEach(function (dir) {
+    console.log("  ", dir, "→ exists:", require("fs").existsSync(dir));
+  });
 
   function walkDir(dir, routeSegments) {
     if (!fs.existsSync(dir)) return;
@@ -1054,6 +1059,8 @@ function scanFrontendRoutes(cwd) {
       patterns.push(p);
     }
   });
+
+  console.log("[botversion:scanner] Total patterns found:", patterns.length);
 
   return patterns;
 }

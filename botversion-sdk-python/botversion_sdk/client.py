@@ -11,12 +11,7 @@ class BotVersionClient:
 
     def __init__(self, options):
         self.api_key = options["api_key"]
-        platform_url = options.get("platform_url", "https://botversion.com")
-
-        # Force IPv4 — on Windows, localhost resolves to ::1 (IPv6) in browsers
-        # but Python's urllib uses 127.0.0.1 (IPv4), causing connection timeouts
-        platform_url = platform_url.replace("https://botversion.com", "http://127.0.0.1")
-        platform_url = platform_url.replace("https://botversion.com", "https://127.0.0.1")
+        platform_url = options.get("platform_url", "http://localhost:3000")
 
         self.platform_url = platform_url
         self.debug = options.get("debug", False)
@@ -52,8 +47,9 @@ class BotVersionClient:
                 "endpoints": endpoints,
             })
             return data
-        except Exception:
-            pass
+        except Exception as e:
+            if self.debug:
+                print(f"[botversion] register_endpoints_now failed: {e}")
 
     # ── Flush batch ──────────────────────────────────────────────────────────
 
@@ -70,8 +66,9 @@ class BotVersionClient:
                 "workspaceKey": self.api_key,
                 "endpoints": to_send,
             })
-        except Exception:
-            pass
+        except Exception as e:
+            if self.debug:
+                print(f"[botversion] flush failed: {e}")
 
     # ── Update single endpoint (runtime interceptor) ─────────────────────────
 
@@ -85,8 +82,9 @@ class BotVersionClient:
                 "responseBody": endpoint.get("response_body"),
                 "detectedBy": endpoint.get("detected_by", "runtime"),
             })
-        except Exception:
-            pass
+        except Exception as e:
+            if self.debug:
+                print(f"[botversion] update_endpoint failed: {e}")
 
 
     # ── Register frontend route patterns ─────────────────────────────────────────
@@ -99,8 +97,9 @@ class BotVersionClient:
                 "workspaceKey": self.api_key,
                 "patterns": patterns,
             })
-        except Exception:
-            pass
+        except Exception as e:
+            if self.debug:
+                print(f"[botversion] register_route_patterns failed: {e}")
 
     # ── Get all endpoints ────────────────────────────────────────────────────
 

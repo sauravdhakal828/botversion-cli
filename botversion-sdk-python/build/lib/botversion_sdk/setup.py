@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="botversion-sdk",
-    version="1.0.3",
+    version="1.0.6",
     description="BotVersion SDK — automatically discover and register your API endpoints",
     long_description=open("README.md").read() if __import__("os").path.exists("README.md") else "",
     long_description_content_type="text/markdown",

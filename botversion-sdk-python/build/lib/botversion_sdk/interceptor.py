@@ -13,6 +13,8 @@ IGNORE_PATHS = [
     "/redoc",
     "/openapi.json",
     "/public",
+    "/admin",
+    "/media",
 ]
 
 # Track reported endpoints — keyed by method:path:body_fields
@@ -112,8 +114,11 @@ def report_endpoint(client, method, path, body_structure, options):
 
     with _lock:
         if body_key in _reported:
+            print(f"[botversion] Already reported, skipping: {method} {normalized}") 
             return
         _reported.add(body_key)
+
+    print(f"[botversion] New endpoint detected: {method} {normalized}") 
 
     json_schema = body_structure_to_json_schema(body_structure)
 
@@ -127,7 +132,7 @@ def report_endpoint(client, method, path, body_structure, options):
                 "detected_by": "runtime",
             })
         except Exception:
-            pass
+            return None
 
     t = threading.Thread(target=_send, daemon=True)
     t.start()
@@ -146,6 +151,8 @@ def attach_fastapi_interceptor(app, client, options):
                 path = request.url.path
                 method = request.method.upper()
 
+                response = await call_next(request)
+
                 if not should_ignore(path, options.get("exclude")):
                     if not options.get("api_prefix") or path.startswith(options["api_prefix"]):
                         try:
@@ -158,9 +165,10 @@ def attach_fastapi_interceptor(app, client, options):
                         except Exception:
                             body_structure = None
 
-                        report_endpoint(client, method, path, body_structure, options)
+                        if response.status_code < 500:
+                            report_endpoint(client, method, path, body_structure, options)
 
-                return await call_next(request)
+                return response
 
         app.add_middleware(BotVersionMiddleware)
 

@@ -102,7 +102,7 @@ async function main() {
   if (!args.key) {
     error("API key is required.");
     log(`\n  Usage: npx botversion-sdk init --key YOUR_WORKSPACE_KEY\n`);
-    log(`  Get your key from: https://botversion.com/settings\n`);
+    log(`  Get your key from: http://localhost:3000/settings\n`);
     process.exit(1);
   }
 
@@ -113,7 +113,7 @@ async function main() {
   step("Fetching project info from platform...");
   let projectInfo;
   try {
-    projectInfo = await fetchProjectInfo(args.key, "https://botversion.com");
+    projectInfo = await fetchProjectInfo(args.key, "http://localhost:3000");
     success(`Project found — ID: ${projectInfo.projectId}`);
   } catch (err) {
     error(err.message);

@@ -11,7 +11,7 @@ const url = require("url");
  */
 function BotVersionClient(options) {
   this.apiKey = options.apiKey;
-  this.platformUrl = options.platformUrl || "https://botversion.com";
+  this.platformUrl = options.platformUrl || "http://localhost:3000";
   this.debug = options.debug || false;
   this.timeout = options.timeout || 30000;
 
@@ -80,9 +80,7 @@ BotVersionClient.prototype._flush = function () {
       endpoints: toSend,
     })
     .then(function (data) {})
-    .catch(function (err) {
-      console.error("[botversion] flush failed:", err.message);
-    });
+    .catch(function (err) {});
 };
 
 /**

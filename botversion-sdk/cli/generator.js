@@ -149,11 +149,11 @@ Fastify support is coming soon. For now, add this manually:
 `,
     koa: `
 Koa support is coming soon. For now, add this manually:
-  See: https://botversion.com/docs
+  See: http://localhost:3000/docs
 `,
     "@nestjs/core": `
 NestJS support is coming soon. For now, add this manually:
-  See: https://botversion.com/docs
+  See: http://localhost:3000/docs
 `,
   };
 
@@ -161,7 +161,7 @@ NestJS support is coming soon. For now, add this manually:
     instructions[framework] ||
     `
 This framework is not yet supported automatically.
-Visit https://botversion.com/docs for manual setup instructions.
+Visit http://localhost:3000/docs for manual setup instructions.
 `
   );
 }

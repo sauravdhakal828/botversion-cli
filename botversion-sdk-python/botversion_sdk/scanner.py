@@ -31,7 +31,10 @@ def scan_fastapi_routes(app):
 
             path = route.path
             # Skip docs/openapi
+            SKIP_PREFIXES = ["/admin", "/static", "/media"]
             if path in ("/docs", "/redoc", "/openapi.json"):
+                continue
+            if any(path.startswith(p) for p in SKIP_PREFIXES):
                 continue
 
             methods = [m for m in route.methods if m not in ("HEAD", "OPTIONS")]
@@ -60,6 +63,10 @@ def scan_fastapi_routes(app):
     except Exception:
         pass
 
+    for ep in endpoints:
+        if ep.get("requestBody") is None and ep["method"] not in ("GET", "DELETE"):
+            print(f"[botversion:scan] MISSING: {ep['method']} {ep['path']}")
+
     return endpoints
 
 
@@ -69,7 +76,7 @@ def scan_flask_routes(app):
     endpoints = []
     seen = set()
 
-    SKIP_PREFIXES = ("/swaggerui", "/static", "/_")
+    SKIP_PREFIXES = ("/swaggerui", "/static", "/_", "/admin", "/media")
     SKIP_EXACT = ("/swagger.json", "/redoc", "/openapi.json", "/docs", "/favicon.ico")
 
     try:
@@ -115,6 +122,10 @@ def scan_flask_routes(app):
     except Exception:
         pass
 
+    for ep in endpoints:
+        if ep.get("requestBody") is None and ep["method"] not in ("GET", "DELETE"):
+            print(f"[botversion:scan] MISSING: {ep['method']} {ep['path']}")
+
     return endpoints
 
 
@@ -144,6 +155,10 @@ def scan_django_routes():
         _walk_django_patterns(resolver.url_patterns, "", endpoints, seen)
     except Exception:
         pass
+
+    for ep in endpoints:
+        if ep.get("requestBody") is None and ep["method"] not in ("GET", "DELETE"):
+            print(f"[botversion:scan] MISSING: {ep['method']} {ep['path']}")
 
     return endpoints
 
@@ -175,8 +190,12 @@ def extract_drf_schema(callback, method):
         if hasattr(view_class, "serializer_class"):
             serializer_class = view_class.serializer_class
 
-        if not serializer_class:
-            return None
+        # Fallback — try calling get_serializer_class() on the view
+        if not serializer_class and hasattr(view_class, "get_serializer_class"):
+            try:
+                serializer_class = view_class().get_serializer_class()
+            except Exception:
+                pass
 
         # Instantiate the serializer to inspect fields
         serializer = serializer_class()
@@ -235,31 +254,49 @@ def extract_drf_schema(callback, method):
         if src:
             fields = set()
 
-            # request.data.get('field') or request.data['field']
             for m in re.finditer(r"request\.data(?:\.get\(|\[)\s*['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", src):
                 fields.add(m.group(1))
 
-            # request.POST.get('field') or request.POST['field']
             for m in re.finditer(r"request\.POST(?:\.get\(|\[)\s*['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", src):
                 fields.add(m.group(1))
 
-            # data = request.data then data['field'] or data.get('field')
             var_match = re.search(r"(\w+)\s*=\s*request\.data", src)
             if var_match:
                 var = var_match.group(1)
                 for m in re.finditer(rf"{var}(?:\.get\(|\[)\s*['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", src):
                     fields.add(m.group(1))
 
-            # validated_data['field'] or validated_data.get('field')
             for m in re.finditer(r"validated_data(?:\.get\(|\[)\s*['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", src):
                 fields.add(m.group(1))
+
+            # SomeSerializer(data=request.data) — extract serializer class and inspect its fields
+            for m in re.finditer(r"(\w+Serializer)\s*\(", src):
+                serializer_name = m.group(1)
+                try:
+                    import sys
+                    for module in sys.modules.values():
+                        serializer_cls = getattr(module, serializer_name, None)
+                        if serializer_cls and hasattr(serializer_cls, "_declared_fields"):
+                            for field_name, field in serializer_cls._declared_fields.items():
+                                if not getattr(field, "read_only", False):
+                                    fields.add(field_name)
+                            break
+                        if serializer_cls and hasattr(serializer_cls, "Meta") and hasattr(getattr(serializer_cls, "Meta"), "fields"):
+                            meta_fields = serializer_cls.Meta.fields
+                            if isinstance(meta_fields, (list, tuple)):
+                                for field_name in meta_fields:
+                                    if field_name != "__all__":
+                                        fields.add(field_name)
+                            break
+                except Exception:
+                    pass
 
             if fields:
                 properties = {f: {"type": infer_field_type(f, src), "description": f.replace("_", " ").title()} for f in fields}
                 return {"type": "object", "properties": properties}
 
     except Exception:
-        pass
+        return None
 
     return None
 
@@ -550,10 +587,16 @@ def _walk_django_patterns(patterns, prefix, endpoints, seen):
         from django.urls.resolvers import URLPattern, URLResolver
     except ImportError:
         return
+    
+    SKIP_PREFIXES = ["/admin", "/static", "/media"]
 
     for pattern in patterns:
         if isinstance(pattern, URLResolver):
             sub_prefix = join_paths(prefix, _django_pattern_to_path(str(pattern.pattern)))
+
+            if any(sub_prefix.startswith(p) for p in SKIP_PREFIXES):
+                continue
+
             _walk_django_patterns(pattern.url_patterns, sub_prefix, endpoints, seen)
 
         elif isinstance(pattern, URLPattern):
@@ -807,7 +850,8 @@ def extract_request_body_schema(route, method):
                 return result
 
     except Exception:
-        pass
+        return None
+
     return None
 
 

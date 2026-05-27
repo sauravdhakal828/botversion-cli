@@ -46,7 +46,7 @@ var BotVersion = {
 
     this._client = new BotVersionClient({
       apiKey: options.apiKey,
-      platformUrl: options.platformUrl || "https://botversion.com",
+      platformUrl: options.platformUrl || "http://localhost:3000",
       debug: options.debug || false,
       timeout: options.timeout || 30000,
     });
@@ -117,16 +117,37 @@ var BotVersion = {
 
       // Send to platform
       if (endpoints.length > 0) {
+        const missing = endpoints.filter(
+          (ep) =>
+            !ep.requestBody && ep.method !== "GET" && ep.method !== "DELETE",
+        );
+        missing.forEach((ep) => {
+          console.log(`[botversion:scan] MISSING: ${ep.method} ${ep.path}`);
+        });
         self._client.registerEndpoints(endpoints);
       }
 
-      var routePatterns = scanner.scanFrontendRoutes(
-        options.cwd || process.cwd(),
+      var cwd = options.cwd || process.cwd();
+      console.log("[botversion] Scanning frontend routes in:", cwd);
+
+      var routePatterns = scanner.scanFrontendRoutes(cwd);
+      console.log("[botversion] Frontend routes found:", routePatterns.length);
+      console.log(
+        "[botversion] Routes:",
+        JSON.stringify(routePatterns, null, 2),
       );
+
       if (routePatterns.length > 0) {
         self._client
           .registerRoutePatterns(routePatterns)
-          .catch(function (err) {});
+          .then(function () {
+            console.log("[botversion] ✅ Routes sent to platform successfully");
+          })
+          .catch(function (err) {
+            console.log("[botversion] ❌ Failed to send routes:", err.message);
+          });
+      } else {
+        console.log("[botversion] ⚠️ No frontend routes found — nothing sent");
       }
     }, 500);
   },

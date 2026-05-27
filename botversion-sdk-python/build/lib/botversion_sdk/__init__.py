@@ -41,6 +41,20 @@ def init(app=None, api_key=None, **options):
         _client = builtins._botversion_client
         _options = builtins._botversion_options
         _initialized = True
+        # Re-attach interceptor after hot reload
+        framework = _detect_framework(app)
+        if framework and _client:
+            interceptor_options = {
+                "exclude": _options.get("exclude", []),
+                "api_prefix": _options.get("api_prefix", None),
+                "debug": _options.get("debug", False),
+            }
+            if framework == "fastapi":
+                attach_fastapi_interceptor(app, _client, interceptor_options)
+            elif framework == "flask":
+                attach_flask_interceptor(app, _client, interceptor_options)
+            elif framework == "django":
+                attach_django_interceptor(_client, interceptor_options)
         return
 
     _initialized = True
@@ -59,7 +73,7 @@ def init(app=None, api_key=None, **options):
 
     _client = BotVersionClient({
         "api_key": api_key,
-        "platform_url": options.get("platform_url", "https://botversion.com"),
+        "platform_url": options.get("platform_url", "http://localhost:3000"),
         "debug": debug,
         "timeout": options.get("timeout", 30),
         "flush_delay": options.get("flush_delay", 3),
@@ -100,6 +114,9 @@ def init(app=None, api_key=None, **options):
                 return
 
             if endpoints:
+                missing = [ep for ep in endpoints if ep.get("requestBody") is None and ep["method"] not in ("GET", "DELETE")]
+                for ep in missing:
+                    print(f"[botversion:scan] MISSING: {ep['method']} {ep['path']}")
                 _client.register_endpoints_now(endpoints)
 
         except Exception as e:
@@ -113,29 +130,52 @@ def init(app=None, api_key=None, **options):
             _client.register_route_patterns(route_patterns)
 
     if framework == "flask":
+        # Scan on startup
+        with app.app_context():
+            t = threading.Thread(target=_run_scan, daemon=False)
+            t.start()
+            t.join(timeout=15)
+            app._botversion_scanned = True
+
+        # Keep after_request as fallback for runtime detection
         @app.after_request
         def _botversion_first_scan(response):
             if not getattr(app, '_botversion_scanned', False):
                 app._botversion_scanned = True
-                threading.Thread(target=_run_scan, daemon=True).start()
+                t = threading.Thread(target=_run_scan, daemon=False)
+                t.start()
+                t.join(timeout=15)
             return response
 
     elif framework == "fastapi":
+        @app.on_event("startup")
+        async def _botversion_startup_scan():
+            if not getattr(app, '_botversion_scanned', False):
+                app._botversion_scanned = True
+                t = threading.Thread(target=_run_scan, daemon=False)
+                t.start()
+                t.join(timeout=15)
+
+        # Keep middleware as fallback for runtime detection
         @app.middleware("http")
         async def _botversion_first_scan(request, call_next):
             if not getattr(app, '_botversion_scanned', False):
                 app._botversion_scanned = True
-                threading.Thread(target=_run_scan, daemon=True).start()
+                t = threading.Thread(target=_run_scan, daemon=False)
+                t.start()
+                t.join(timeout=15)
             return await call_next(request)
 
     elif framework == "django":
         try:
             from django.apps import apps
             if apps.ready:
-                threading.Thread(target=_run_scan, daemon=True).start()
+                t = threading.Thread(target=_run_scan, daemon=False)
+                t.start()
+                t.join(timeout=15)
         except Exception:
             t = threading.Timer(2.0, _run_scan)
-            t.daemon = True
+            t.daemon = False
             t.start()
 
 

@@ -18,6 +18,7 @@ function attachInterceptor(app, client, options) {
     "/_next",
     "/static",
     "/public",
+    "/admin",
   ].concat(options.exclude || []);
 
   app.use(function botVersionInterceptor(req, res, next) {
@@ -77,9 +78,7 @@ function attachInterceptor(app, client, options) {
             requestBody: jsonSchema,
             detectedBy: "runtime",
           })
-          .catch(function (err) {
-            console.error("[botversion] update_endpoint failed:", err.message);
-          });
+          .catch(function (err) {});
       });
     }
 
@@ -183,7 +182,14 @@ function attachNextJsInterceptor(client, options) {
         const method = req.method ? req.method.toUpperCase() : "";
 
         const shouldIgnore = (options.exclude || [])
-          .concat(["/health", "/favicon.ico", "/_next", "/static", "/public"])
+          .concat([
+            "/health",
+            "/favicon.ico",
+            "/_next",
+            "/static",
+            "/public",
+            "/admin",
+          ])
           .some(function (p) {
             return path.startsWith(p);
           });
@@ -197,29 +203,111 @@ function attachNextJsInterceptor(client, options) {
           if (!reportedEndpoints.has(endpointKey)) {
             reportedEndpoints.add(endpointKey);
 
-            setImmediate(function () {
+            // Skip file uploads — too large and not JSON
+            const contentType = req.headers["content-type"] || "";
+            if (contentType.includes("multipart/form-data")) {
               client
                 .updateEndpoint({
                   method: method,
                   path: normalizedPath,
+                  requestBody: null,
                   detectedBy: "runtime",
                 })
-                .catch(function (err) {
-                  console.error("[botversion] update failed:", err.message);
-                });
-            });
+                .catch(function () {});
+              return originalEmit.apply(this, arguments);
+            }
+
+            // Helper to send body structure to platform
+            function reportBody(bodyObj) {
+              try {
+                let parsedBody = null;
+                const structure = buildBodyStructure(bodyObj);
+                if (structure) {
+                  parsedBody = {
+                    type: "object",
+                    properties: Object.fromEntries(
+                      Object.entries(structure).map(([key, type]) => [
+                        key,
+                        {
+                          type:
+                            type === "null" || type === "[redacted]"
+                              ? "string"
+                              : type,
+                        },
+                      ]),
+                    ),
+                  };
+                }
+                client
+                  .updateEndpoint({
+                    method: method,
+                    path: normalizedPath,
+                    requestBody: parsedBody,
+                    detectedBy: "runtime",
+                  })
+                  .catch(function () {});
+              } catch (e) {}
+            }
+
+            // APP ROUTER — req.body is a Web Stream, read it early
+            // and put it back as a new stream so App Router can still read it
+            if (
+              typeof req.body !== "undefined" &&
+              req.body &&
+              typeof req.body.getReader === "function"
+            ) {
+              try {
+                const reader = req.body.getReader();
+                const chunks = [];
+                function readChunk() {
+                  reader
+                    .read()
+                    .then(function (result) {
+                      if (result.done) {
+                        const fullBuffer = Buffer.concat(
+                          chunks.map(function (c) {
+                            return Buffer.from(c);
+                          }),
+                        );
+                        // Put the body back as a new ReadableStream
+                        const { ReadableStream } = require("stream/web");
+                        req.body = new ReadableStream({
+                          start: function (controller) {
+                            controller.enqueue(fullBuffer);
+                            controller.close();
+                          },
+                        });
+                        // Parse and report
+                        try {
+                          const parsed = JSON.parse(fullBuffer.toString());
+                          reportBody(parsed);
+                        } catch (e) {}
+                      } else {
+                        chunks.push(result.value);
+                        readChunk();
+                      }
+                    })
+                    .catch(function () {});
+                }
+                readChunk();
+              } catch (e) {}
+              return originalEmit.apply(this, arguments);
+            }
+
+            // PAGES ROUTER — req.body is populated by Next.js after parsing
+            // We intercept res.end because by then req.body is fully available
+            const originalResEnd = res.end.bind(res);
+            res.end = function (chunk, encoding, callback) {
+              reportBody(req.body || null);
+              return originalResEnd(chunk, encoding, callback);
+            };
           }
         }
       }
 
       return originalEmit.apply(this, arguments);
     };
-  } catch (err) {
-    console.error(
-      "[botversion] failed to attach Next.js interceptor:",
-      err.message,
-    );
-  }
+  } catch (err) {}
 }
 
 module.exports = {

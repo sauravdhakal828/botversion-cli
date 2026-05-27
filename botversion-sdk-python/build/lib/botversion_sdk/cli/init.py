@@ -158,7 +158,7 @@ def main():
         log()
         log("  Usage: botversion-init --key YOUR_WORKSPACE_KEY")
         log()
-        log("  Get your key from: https://botversion.com/settings")
+        log("  Get your key from: http://localhost:3000/workspace/settings")
         log()
         sys.exit(1)
 
@@ -170,7 +170,7 @@ def main():
     try:
         import urllib.request
         import json as _json
-        url = f"https://botversion.com/api/sdk/project-info?workspaceKey={args.key}"
+        url = f"http://localhost:3000/api/sdk/project-info?workspaceKey={args.key}"
         with urllib.request.urlopen(url) as response:
             project_info = _json.loads(response.read().decode())
         success(f"Project found — ID: {project_info.get('projectId')}")

@@ -13,6 +13,8 @@ IGNORE_PATHS = [
     "/redoc",
     "/openapi.json",
     "/public",
+    "/admin",
+    "/media",
 ]
 
 # Track reported endpoints — keyed by method:path:body_fields
@@ -126,8 +128,8 @@ def report_endpoint(client, method, path, body_structure, options):
                 "request_body": json_schema,
                 "detected_by": "runtime",
             })
-        except Exception as e:
-            print(f"[botversion] update_endpoint failed: {e}")
+        except Exception:
+            return None
 
     t = threading.Thread(target=_send, daemon=True)
     t.start()
