@@ -1,9 +1,265 @@
-// botversion-sdk/index.js
 "use strict";
 
 var scanner = require("./scanner");
 var interceptor = require("./interceptor");
 var BotVersionClient = require("./client");
+
+// ── Framework auto-detection ─────────────────────────────────────────────────
+// Reads package.json from the customer's codebase and figures out
+// which backend and frontend frameworks they are using.
+function detectFrameworks(cwd) {
+  const fs = require("fs");
+  const path = require("path");
+
+  const result = {
+    backend: "unknown",
+    frontend: "unknown",
+  };
+
+  let pkg = {};
+  try {
+    const pkgPath = path.join(cwd, "package.json");
+    if (fs.existsSync(pkgPath)) {
+      pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+    }
+  } catch {
+    return result;
+  }
+
+  const deps = Object.assign(
+    {},
+    pkg.dependencies || {},
+    pkg.devDependencies || {},
+  );
+
+  // ── Backend detection ──────────────────────────────────────────────────────
+  if (deps["@nestjs/core"]) {
+    result.backend = "nestjs";
+  } else if (deps["fastify"]) {
+    result.backend = "fastify";
+  } else if (deps["@adonisjs/core"]) {
+    result.backend = "adonis";
+  } else if (deps["@hapi/hapi"] || deps["hapi"]) {
+    result.backend = "hapi";
+  } else if (deps["koa"]) {
+    result.backend = "koa";
+  } else if (deps["next"]) {
+    result.backend = "nextjs";
+  } else if (deps["express"]) {
+    result.backend = "express";
+  } else if (deps["@remix-run/node"] || deps["@remix-run/serve"]) {
+    result.backend = "remix";
+  } else if (deps["nuxt"] || deps["nuxt3"] || deps["@nuxt/core"]) {
+    result.backend = "nuxt";
+  } else if (deps["@sveltejs/kit"]) {
+    result.backend = "sveltekit";
+  }
+
+  // ── Frontend detection ─────────────────────────────────────────────────────
+  if (deps["next"]) {
+    result.frontend = "nextjs";
+  } else if (deps["nuxt"] || deps["nuxt3"] || deps["@nuxt/core"]) {
+    result.frontend = "nuxt";
+  } else if (deps["@sveltejs/kit"]) {
+    result.frontend = "sveltekit";
+  } else if (deps["@remix-run/react"]) {
+    result.frontend = "remix";
+  } else if (deps["@tanstack/router"] || deps["@tanstack/react-router"]) {
+    result.frontend = "tanstack";
+  } else if (deps["vue"] && (deps["vue-router"] || deps["@nuxtjs/router"])) {
+    result.frontend = "vue";
+  } else if (deps["@angular/core"]) {
+    result.frontend = "angular";
+  } else if (deps["svelte"]) {
+    result.frontend = "svelte";
+  } else if (deps["react"] && deps["react-router-dom"]) {
+    result.frontend = "react-router";
+  } else if (deps["astro"]) {
+    result.frontend = "astro";
+  } else if (deps["react"]) {
+    result.frontend = "react";
+  }
+
+  return result;
+}
+
+// ── Run the right backend scanner ────────────────────────────────────────────
+function runBackendScanner(detectedBackend, app, options, cwd) {
+  const endpoints = [];
+
+  switch (detectedBackend) {
+    case "express":
+      endpoints.push(...scanner.scanExpressRoutes(app, cwd));
+      break;
+
+    case "nextjs": {
+      const fs = require("fs");
+      const path = require("path");
+
+      const possibleAppDirs = [
+        path.join(cwd, "app"),
+        path.join(cwd, "src", "app"),
+      ];
+      const possiblePagesDirs = [
+        path.join(cwd, "pages"),
+        path.join(cwd, "src", "pages"),
+      ];
+
+      for (const dir of possibleAppDirs) {
+        if (fs.existsSync(dir)) {
+          endpoints.push(...scanner.scanNextJsAppRoutes(dir));
+        }
+      }
+      for (const dir of possiblePagesDirs) {
+        if (fs.existsSync(dir)) {
+          endpoints.push(...scanner.scanNextJsRoutes(dir));
+        }
+      }
+      break;
+    }
+
+    case "fastify":
+      endpoints.push(...scanner.scanFastifyRoutes(cwd));
+      break;
+
+    case "nestjs":
+      endpoints.push(...scanner.scanNestJsRoutes(cwd));
+      break;
+
+    case "koa":
+      endpoints.push(...scanner.scanKoaRoutes(cwd));
+      break;
+
+    case "hapi":
+      endpoints.push(...scanner.scanHapiRoutes(cwd));
+      break;
+
+    case "adonis":
+      endpoints.push(...scanner.scanAdonisRoutes(cwd));
+      break;
+
+    case "nuxt":
+      endpoints.push(...scanner.scanNuxtServerRoutes(cwd));
+      break;
+
+    case "sveltekit":
+      endpoints.push(...scanner.scanSvelteKitServerRoutes(cwd));
+      break;
+
+    case "remix":
+      endpoints.push(...scanner.scanRemixServerRoutes(cwd));
+      break;
+
+    default:
+      // Unknown backend — try Express as best guess
+      if (app) {
+        endpoints.push(...scanner.scanExpressRoutes(app, cwd));
+      }
+      break;
+  }
+
+  return endpoints;
+}
+
+// ── Attach the right runtime interceptor ─────────────────────────────────────
+function attachRuntimeInterceptor(detectedBackend, app, client, options) {
+  switch (detectedBackend) {
+    case "express":
+      interceptor.attachInterceptor(app, client, {
+        exclude: options.exclude || [],
+        apiPrefix: options.apiPrefix || null,
+        debug: options.debug || false,
+      });
+      break;
+
+    case "nextjs":
+      interceptor.attachNextJsInterceptor(client, {
+        exclude: options.exclude || [],
+        apiPrefix: options.apiPrefix || "/api",
+        debug: options.debug || false,
+      });
+      break;
+
+    case "fastify":
+      if (app) {
+        interceptor.attachFastifyInterceptor(app, client, {
+          exclude: options.exclude || [],
+          apiPrefix: options.apiPrefix || null,
+          debug: options.debug || false,
+        });
+      }
+      break;
+
+    case "koa":
+      if (app) {
+        interceptor.attachKoaInterceptor(app, client, {
+          exclude: options.exclude || [],
+          apiPrefix: options.apiPrefix || null,
+          debug: options.debug || false,
+        });
+      }
+      break;
+
+    case "hapi":
+      if (app) {
+        interceptor.attachHapiInterceptor(app, client, {
+          exclude: options.exclude || [],
+          apiPrefix: options.apiPrefix || null,
+          debug: options.debug || false,
+        });
+      }
+      break;
+
+    case "nestjs":
+      interceptor.attachNestJsInterceptor(client, {
+        exclude: options.exclude || [],
+        apiPrefix: options.apiPrefix || "/",
+        debug: options.debug || false,
+      });
+      break;
+
+    case "sveltekit":
+      interceptor.attachSvelteKitInterceptor(client, {
+        exclude: options.exclude || [],
+        apiPrefix: options.apiPrefix || "/",
+        debug: options.debug || false,
+      });
+      break;
+
+    case "nuxt":
+      interceptor.attachNuxtInterceptor(client, {
+        exclude: options.exclude || [],
+        apiPrefix: options.apiPrefix || "/api",
+        debug: options.debug || false,
+      });
+      break;
+
+    case "remix":
+      interceptor.attachRemixInterceptor(client, {
+        exclude: options.exclude || [],
+        apiPrefix: options.apiPrefix || "/",
+        debug: options.debug || false,
+      });
+      break;
+
+    case "adonis":
+      interceptor.attachAdonisInterceptor(client, {
+        exclude: options.exclude || [],
+        apiPrefix: options.apiPrefix || "/",
+        debug: options.debug || false,
+      });
+      break;
+
+    default:
+      // Unknown — fall back to Next.js http server patch as best guess
+      interceptor.attachNextJsInterceptor(client, {
+        exclude: options.exclude || [],
+        apiPrefix: options.apiPrefix || "/",
+        debug: options.debug || false,
+      });
+      break;
+  }
+}
 
 var BotVersion = {
   _client: null,
@@ -31,12 +287,9 @@ var BotVersion = {
       this._client = global._botVersionClient;
       this._options = global._botVersionOptions;
       this._initialized = true;
-      // Re-attach interceptor after hot reload
-      interceptor.attachNextJsInterceptor(this._client, {
-        exclude: (global._botVersionOptions || {}).exclude || [],
-        apiPrefix: (global._botVersionOptions || {}).apiPrefix || "/api",
-        debug: (global._botVersionOptions || {}).debug || false,
-      });
+      const savedOptions = global._botVersionOptions || {};
+      const savedFramework = global._botVersionFramework || "nextjs";
+      attachRuntimeInterceptor(savedFramework, app, this._client, savedOptions);
       return;
     }
 
@@ -55,87 +308,38 @@ var BotVersion = {
     global._botVersionOptions = options;
 
     var self = this;
+    var cwd = options.cwd || process.cwd();
     var debug = options.debug || false;
 
-    // ── Runtime interceptor — Express or Next.js ─────────────────────────────
-    if (app && app.use) {
-      // Express
-      interceptor.attachInterceptor(app, self._client, {
-        exclude: options.exclude || [],
-        apiPrefix: options.apiPrefix || null,
-        debug: debug,
-      });
-    } else {
-      // Next.js — patch the global fetch/http server to intercept API calls
-      interceptor.attachNextJsInterceptor(self._client, {
-        exclude: options.exclude || [],
-        apiPrefix: options.apiPrefix || "/api",
-        debug: debug,
-      });
+    // ── Auto-detect frameworks ───────────────────────────────────────────────
+    var detected = detectFrameworks(cwd);
+
+    // Allow manual override from options
+    var detectedBackend = options.framework || detected.backend;
+    var detectedFrontend = options.frontendFramework || detected.frontend;
+
+    global._botVersionFramework = detectedBackend;
+
+    if (debug) {
+      console.log("[botversion] Detected backend:", detectedBackend);
+      console.log("[botversion] Detected frontend:", detectedFrontend);
     }
+
+    // ── Attach runtime interceptor ───────────────────────────────────────────
+    attachRuntimeInterceptor(detectedBackend, app, self._client, options);
 
     // ── Static scan ──────────────────────────────────────────────────────────
     setTimeout(function () {
-      var endpoints = [];
+      // Run backend scanner
+      var endpoints = runBackendScanner(detectedBackend, app, options, cwd);
 
-      // Express scan
-      if (app) {
-        var cwd = options.cwd || process.cwd();
-        endpoints = scanner.scanExpressRoutes(app, cwd);
-      }
-
-      // Next.js scan
-      if (!app) {
-        const fs = require("fs");
-        const path = require("path");
-        const cwd = process.cwd();
-
-        const possibleAppDirs = [
-          path.join(cwd, "app"),
-          path.join(cwd, "src", "app"),
-        ];
-
-        const possiblePagesDirs = [
-          path.join(cwd, "pages"),
-          path.join(cwd, "src", "pages"),
-        ];
-
-        for (const dir of possibleAppDirs) {
-          if (fs.existsSync(dir)) {
-            const routes = scanner.scanNextJsAppRoutes(dir);
-            endpoints = endpoints.concat(routes);
-          }
-        }
-
-        for (const dir of possiblePagesDirs) {
-          if (fs.existsSync(dir)) {
-            const routes = scanner.scanNextJsRoutes(dir);
-            endpoints = endpoints.concat(routes);
-          }
-        }
-      }
-
-      // Send to platform
+      // Send endpoints to platform
       if (endpoints.length > 0) {
-        const missing = endpoints.filter(
-          (ep) =>
-            !ep.requestBody && ep.method !== "GET" && ep.method !== "DELETE",
-        );
-        missing.forEach((ep) => {
-          console.log(`[botversion:scan] MISSING: ${ep.method} ${ep.path}`);
-        });
         self._client.registerEndpoints(endpoints);
       }
 
-      var cwd = options.cwd || process.cwd();
-      console.log("[botversion] Scanning frontend routes in:", cwd);
-
+      // Run frontend route scanner
       var routePatterns = scanner.scanFrontendRoutes(cwd);
-      console.log("[botversion] Frontend routes found:", routePatterns.length);
-      console.log(
-        "[botversion] Routes:",
-        JSON.stringify(routePatterns, null, 2),
-      );
 
       if (routePatterns.length > 0) {
         self._client
@@ -149,7 +353,7 @@ var BotVersion = {
       } else {
         console.log("[botversion] ⚠️ No frontend routes found — nothing sent");
       }
-    }, 500);
+    }, 3000);
   },
 
   getEndpoints: function () {

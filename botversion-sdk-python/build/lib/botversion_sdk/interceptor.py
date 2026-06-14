@@ -114,11 +114,8 @@ def report_endpoint(client, method, path, body_structure, options):
 
     with _lock:
         if body_key in _reported:
-            print(f"[botversion] Already reported, skipping: {method} {normalized}") 
             return
         _reported.add(body_key)
-
-    print(f"[botversion] New endpoint detected: {method} {normalized}") 
 
     json_schema = body_structure_to_json_schema(body_structure)
 

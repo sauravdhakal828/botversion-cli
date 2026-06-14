@@ -310,9 +310,317 @@ function attachNextJsInterceptor(client, options) {
   } catch (err) {}
 }
 
+/**
+ * Attaches a Fastify hook that silently intercepts every request
+ * and reports new endpoints to BotVersion platform.
+ */
+function attachFastifyInterceptor(fastify, client, options) {
+  options = options || {};
+
+  const ignorePaths = [
+    "/health",
+    "/favicon.ico",
+    "/_next",
+    "/static",
+    "/public",
+    "/admin",
+  ].concat(options.exclude || []);
+
+  fastify.addHook("onRequest", async function (request, reply) {
+    const path = request.url ? request.url.split("?")[0] : "";
+    const method = request.method ? request.method.toUpperCase() : "";
+
+    const shouldIgnore = ignorePaths.some(function (p) {
+      return path.startsWith(p);
+    });
+
+    if (shouldIgnore) return;
+
+    if (options.apiPrefix && !path.startsWith(options.apiPrefix)) return;
+
+    const normalizedPath = normalizePath(path);
+    const endpointKey = method + ":" + normalizedPath;
+
+    if (!reportedEndpoints.has(endpointKey)) {
+      reportedEndpoints.add(endpointKey);
+
+      setImmediate(function () {
+        client
+          .updateEndpoint({
+            method,
+            path: normalizedPath,
+            requestBody: null,
+            detectedBy: "runtime-fastify",
+          })
+          .catch(function () {});
+      });
+    }
+  });
+
+  // Use onSend hook to capture body after parsing
+  fastify.addHook("preHandler", async function (request, reply) {
+    const path = request.url ? request.url.split("?")[0] : "";
+    const method = request.method ? request.method.toUpperCase() : "";
+    const normalizedPath = normalizePath(path);
+    const bodyKey = method + ":" + normalizedPath + ":body";
+
+    if (reportedEndpoints.has(bodyKey)) return;
+    reportedEndpoints.add(bodyKey);
+
+    const body = request.body;
+    if (!body) return;
+
+    const bodyStructure = buildBodyStructure(body);
+    if (!bodyStructure) return;
+
+    const jsonSchema = {
+      type: "object",
+      properties: Object.fromEntries(
+        Object.entries(bodyStructure).map(function ([key, type]) {
+          return [
+            key,
+            {
+              type: type === "null" || type === "[redacted]" ? "string" : type,
+            },
+          ];
+        }),
+      ),
+    };
+
+    setImmediate(function () {
+      client
+        .updateEndpoint({
+          method,
+          path: normalizedPath,
+          requestBody: jsonSchema,
+          detectedBy: "runtime-fastify",
+        })
+        .catch(function () {});
+    });
+  });
+}
+
+/**
+ * Attaches a Koa middleware that silently intercepts every request
+ * and reports new endpoints to BotVersion platform.
+ */
+function attachKoaInterceptor(app, client, options) {
+  options = options || {};
+
+  const ignorePaths = [
+    "/health",
+    "/favicon.ico",
+    "/_next",
+    "/static",
+    "/public",
+    "/admin",
+  ].concat(options.exclude || []);
+
+  // IMPORTANT: This interceptor must be added AFTER koa-bodyparser middleware
+  // so that ctx.request.body is already populated when we read it.
+  app.use(async function botVersionKoaInterceptor(ctx, next) {
+    await next();
+
+    const path = ctx.path || "";
+    const method = ctx.method ? ctx.method.toUpperCase() : "";
+
+    const shouldIgnore = ignorePaths.some(function (p) {
+      return path.startsWith(p);
+    });
+
+    if (shouldIgnore) return;
+
+    if (options.apiPrefix && !path.startsWith(options.apiPrefix)) return;
+
+    const normalizedPath = normalizePath(path);
+    const endpointKey = method + ":" + normalizedPath;
+
+    const body = ctx.request.body;
+    const bodyStructure = buildBodyStructure(body);
+    const bodyKey =
+      endpointKey +
+      ":" +
+      Object.keys(bodyStructure || {})
+        .sort()
+        .join(",");
+
+    if (!reportedEndpoints.has(bodyKey)) {
+      reportedEndpoints.add(bodyKey);
+
+      const jsonSchema = bodyStructure
+        ? {
+            type: "object",
+            properties: Object.fromEntries(
+              Object.entries(bodyStructure).map(function ([key, type]) {
+                return [
+                  key,
+                  {
+                    type:
+                      type === "null" || type === "[redacted]"
+                        ? "string"
+                        : type,
+                  },
+                ];
+              }),
+            ),
+          }
+        : null;
+
+      setImmediate(function () {
+        client
+          .updateEndpoint({
+            method,
+            path: normalizedPath,
+            requestBody: jsonSchema,
+            detectedBy: "runtime-koa",
+          })
+          .catch(function () {});
+      });
+    }
+  });
+}
+
+/**
+ * Attaches a Hapi lifecycle extension that silently intercepts every request
+ * and reports new endpoints to BotVersion platform.
+ */
+function attachHapiInterceptor(server, client, options) {
+  options = options || {};
+
+  const ignorePaths = [
+    "/health",
+    "/favicon.ico",
+    "/_next",
+    "/static",
+    "/public",
+    "/admin",
+  ].concat(options.exclude || []);
+
+  server.ext("onPostAuth", function (request, h) {
+    const path = request.path || "";
+    const method = request.method ? request.method.toUpperCase() : "";
+
+    const shouldIgnore = ignorePaths.some(function (p) {
+      return path.startsWith(p);
+    });
+
+    if (shouldIgnore) return h.continue;
+
+    if (options.apiPrefix && !path.startsWith(options.apiPrefix))
+      return h.continue;
+
+    const normalizedPath = normalizePath(path);
+    const endpointKey = method + ":" + normalizedPath;
+
+    const body = request.payload;
+    const bodyStructure = buildBodyStructure(body);
+    const bodyKey =
+      endpointKey +
+      ":" +
+      Object.keys(bodyStructure || {})
+        .sort()
+        .join(",");
+
+    if (!reportedEndpoints.has(bodyKey)) {
+      reportedEndpoints.add(bodyKey);
+
+      const jsonSchema = bodyStructure
+        ? {
+            type: "object",
+            properties: Object.fromEntries(
+              Object.entries(bodyStructure).map(function ([key, type]) {
+                return [
+                  key,
+                  {
+                    type:
+                      type === "null" || type === "[redacted]"
+                        ? "string"
+                        : type,
+                  },
+                ];
+              }),
+            ),
+          }
+        : null;
+
+      setImmediate(function () {
+        client
+          .updateEndpoint({
+            method,
+            path: normalizedPath,
+            requestBody: jsonSchema,
+            detectedBy: "runtime-hapi",
+          })
+          .catch(function () {});
+      });
+    }
+
+    return h.continue;
+  });
+}
+
+/**
+ * Attaches a NestJS interceptor by patching the underlying http server.
+ * NestJS runs on top of Express or Fastify under the hood so we can
+ * patch the Node http server the same way we do for Next.js.
+ */
+function attachNestJsInterceptor(client, options) {
+  // NestJS runs on Node http server under the hood
+  // So we reuse the same approach as Next.js
+  attachNextJsInterceptor(client, {
+    exclude: (options || {}).exclude || [],
+    apiPrefix: (options || {}).apiPrefix || "/",
+    debug: (options || {}).debug || false,
+  });
+}
+
+/**
+ * SvelteKit, Nuxt and Remix all run on Node http server
+ * so we reuse the Next.js interceptor approach for all of them.
+ */
+function attachSvelteKitInterceptor(client, options) {
+  attachNextJsInterceptor(client, {
+    exclude: (options || {}).exclude || [],
+    apiPrefix: (options || {}).apiPrefix || "/",
+    debug: (options || {}).debug || false,
+  });
+}
+
+function attachNuxtInterceptor(client, options) {
+  attachNextJsInterceptor(client, {
+    exclude: (options || {}).exclude || [],
+    apiPrefix: (options || {}).apiPrefix || "/api",
+    debug: (options || {}).debug || false,
+  });
+}
+
+function attachRemixInterceptor(client, options) {
+  attachNextJsInterceptor(client, {
+    exclude: (options || {}).exclude || [],
+    apiPrefix: (options || {}).apiPrefix || "/",
+    debug: (options || {}).debug || false,
+  });
+}
+
+function attachAdonisInterceptor(client, options) {
+  attachNextJsInterceptor(client, {
+    exclude: (options || {}).exclude || [],
+    apiPrefix: (options || {}).apiPrefix || "/",
+    debug: (options || {}).debug || false,
+  });
+}
+
 module.exports = {
   attachInterceptor,
   attachNextJsInterceptor,
+  attachFastifyInterceptor,
+  attachKoaInterceptor,
+  attachHapiInterceptor,
+  attachNestJsInterceptor,
+  attachSvelteKitInterceptor,
+  attachNuxtInterceptor,
+  attachRemixInterceptor,
+  attachAdonisInterceptor,
   normalizePath,
   buildBodyStructure,
 };

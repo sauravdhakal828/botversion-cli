@@ -127,6 +127,8 @@ class BotVersionClient:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as res:
                 response_data = res.read().decode("utf-8")
+                if not response_data or not response_data.strip():
+                    return {}
                 return json.loads(response_data)
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8")
@@ -153,6 +155,8 @@ class BotVersionClient:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as res:
                 response_data = res.read().decode("utf-8")
+                if not response_data or not response_data.strip():
+                    return {}
                 return json.loads(response_data)
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8")

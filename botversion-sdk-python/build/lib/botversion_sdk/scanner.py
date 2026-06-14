@@ -861,29 +861,152 @@ def scan_frontend_routes(cwd):
     patterns = []
     seen = set()
 
-    # Dirs to scan for file-based frameworks (Next.js, Nuxt, SvelteKit, Remix)
-    dirs_to_scan = [
-        os.path.join(cwd, "pages"),
-        os.path.join(cwd, "src", "pages"),
-        os.path.join(cwd, "app"),
-        os.path.join(cwd, "src", "app"),
-        os.path.join(cwd, "src", "routes"),
-        os.path.join(cwd, "routes"),
-        os.path.join(cwd, "app", "routes"),
-    ]
+    # Build a list of all candidate directories to scan
+    # This handles: simple projects, monorepos, nested structures
+    candidate_dirs = _find_all_frontend_dirs(cwd)
+    print(f"[botversion:scanner] Frontend candidate dirs: {candidate_dirs}")
 
-    for base_dir in dirs_to_scan:
-        if os.path.isdir(base_dir):
-            _walk_frontend_dir(base_dir, [], patterns, seen)
+    for candidate in candidate_dirs:
+        dirs_to_scan = [
+            os.path.join(candidate, "pages"),
+            os.path.join(candidate, "src", "pages"),
+            os.path.join(candidate, "app"),
+            os.path.join(candidate, "src", "app"),
+            os.path.join(candidate, "src", "routes"),
+            os.path.join(candidate, "routes"),
+            os.path.join(candidate, "app", "routes"),
+        ]
 
-    # Also scan config-based frameworks (React Router, Vue Router, Angular)
-    config_patterns = _scan_config_based_routes(cwd)
-    for p in config_patterns:
-        if p["pattern"] not in seen:
-            seen.add(p["pattern"])
-            patterns.append(p)
+        for base_dir in dirs_to_scan:
+            if os.path.isdir(base_dir):
+                print(f"[botversion:scanner] Scanning dir: {base_dir}")
+                _walk_frontend_dir(base_dir, [], patterns, seen)
 
+        # Also scan config-based frameworks (React Router, Vue Router, Angular)
+        config_patterns = _scan_config_based_routes(candidate)
+        for p in config_patterns:
+            if p["pattern"] not in seen:
+                seen.add(p["pattern"])
+                patterns.append(p)
+
+    print(f"[botversion:scanner] Total frontend patterns found: {len(patterns)}")
     return patterns
+
+
+def _find_all_frontend_dirs(cwd):
+    """
+    Automatically discover all frontend app directories.
+    Handles simple projects, monorepos, and any nested structure.
+    Always includes cwd itself first so simple projects keep working.
+    """
+    import os
+
+    # Files that indicate a frontend app
+    FRONTEND_INDICATORS = {
+        "next.config.js", "next.config.ts",
+        "react-router.config.ts", "react-router.config.js",
+        "vite.config.ts", "vite.config.js",
+        "nuxt.config.ts", "nuxt.config.js",
+        "svelte.config.js", "svelte.config.ts",
+        "remix.config.js", "remix.config.ts",
+        "angular.json",
+    }
+
+    SKIP_DIRS = {
+        "node_modules", ".git", "dist", "build",
+        ".next", ".nuxt", "coverage", "__pycache__",
+    }
+
+    found = []
+
+    def is_frontend_dir(path_to_check):
+        # Check 1 — indicator files (most reliable)
+        for indicator in FRONTEND_INDICATORS:
+            if os.path.isfile(os.path.join(path_to_check, indicator)):
+                return True
+        # Check 2 — fallback: check package.json for frontend frameworks
+        try:
+            import json
+            pkg_path = os.path.join(path_to_check, "package.json")
+            if os.path.isfile(pkg_path):
+                with open(pkg_path, "r", encoding="utf-8") as f:
+                    pkg = json.load(f)
+                deps = {}
+                deps.update(pkg.get("dependencies", {}))
+                deps.update(pkg.get("devDependencies", {}))
+                frontend_packages = [
+                    "react", "vue", "angular", "@angular/core",
+                    "svelte", "solid-js", "preact", "nuxt",
+                    "@remix-run/react", "next", "@sveltejs/kit",
+                ]
+                if any(p in deps for p in frontend_packages):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    # Always check cwd itself first
+    if is_frontend_dir(cwd):
+        found.append(cwd)
+
+    # Walk up max 1 level to find monorepo root
+    # then scan siblings only if parent looks like a real project root
+    current = cwd
+    for _ in range(1):
+        parent = os.path.dirname(current)
+        if parent == current:
+            break  # reached filesystem root
+        current = parent
+
+        # Only scan siblings if parent has signs of being a project root
+        parent_has_package_json = os.path.isfile(os.path.join(current, "package.json"))
+        parent_has_project_files = (
+            os.path.isfile(os.path.join(current, "docker-compose.yml")) or
+            os.path.isfile(os.path.join(current, "docker-compose.yaml")) or
+            os.path.isfile(os.path.join(current, ".env")) or
+            os.path.isfile(os.path.join(current, "turbo.json")) or
+            os.path.isfile(os.path.join(current, "pnpm-workspace.yaml"))
+        )
+
+        if not parent_has_package_json and not parent_has_project_files:
+            break  # parent is probably a random folder like Desktop, skip
+
+        try:
+            for entry in os.listdir(current):
+                sub = os.path.join(current, entry)
+
+                if not os.path.isdir(sub):
+                    continue
+                if entry in SKIP_DIRS:
+                    continue
+                if sub == cwd:
+                    continue  # already added above
+
+                # Check direct subfolder
+                if is_frontend_dir(sub) and sub not in found:
+                    found.append(sub)
+
+                # Also check one level deeper (e.g. apps/web/frontend)
+                try:
+                    for sub_entry in os.listdir(sub):
+                        sub_sub = os.path.join(sub, sub_entry)
+                        if not os.path.isdir(sub_sub):
+                            continue
+                        if sub_entry in SKIP_DIRS:
+                            continue
+                        if is_frontend_dir(sub_sub) and sub_sub not in found:
+                            found.append(sub_sub)
+                except OSError:
+                    continue
+
+        except OSError:
+            continue
+
+    # If nothing found at all, fall back to cwd
+    if not found:
+        found.append(cwd)
+
+    return found
 
 
 

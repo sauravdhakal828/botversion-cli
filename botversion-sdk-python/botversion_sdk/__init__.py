@@ -10,6 +10,14 @@ from .interceptor import (
     attach_fastapi_interceptor,
     attach_flask_interceptor,
     attach_django_interceptor,
+    attach_starlette_interceptor,
+    attach_sanic_interceptor,
+    attach_falcon_interceptor,
+    attach_bottle_interceptor,
+    attach_aiohttp_interceptor,
+    attach_tornado_interceptor,
+    attach_pyramid_interceptor,
+    attach_cherrypy_interceptor,
 )
 
 _initialized = False
@@ -55,6 +63,23 @@ def init(app=None, api_key=None, **options):
                 attach_flask_interceptor(app, _client, interceptor_options)
             elif framework == "django":
                 attach_django_interceptor(_client, interceptor_options)
+            # ── NEW ───────────────────────────────────────────────────────
+            elif framework == "starlette":
+                attach_starlette_interceptor(app, _client, interceptor_options)
+            elif framework == "sanic":
+                attach_sanic_interceptor(app, _client, interceptor_options)
+            elif framework == "falcon":
+                attach_falcon_interceptor(app, _client, interceptor_options)
+            elif framework == "bottle":
+                attach_bottle_interceptor(app, _client, interceptor_options)
+            elif framework == "aiohttp":
+                attach_aiohttp_interceptor(app, _client, interceptor_options)
+            elif framework == "tornado":
+                attach_tornado_interceptor(app, _client, interceptor_options)
+            elif framework == "pyramid":
+                attach_pyramid_interceptor(app, _client, interceptor_options)
+            elif framework == "cherrypy":
+                attach_cherrypy_interceptor(app, _client, interceptor_options)
         return
 
     _initialized = True
@@ -96,6 +121,23 @@ def init(app=None, api_key=None, **options):
         attach_flask_interceptor(app, _client, interceptor_options)
     elif framework == "django":
         attach_django_interceptor(_client, interceptor_options)
+    # ── NEW ───────────────────────────────────────────────────────────────────
+    elif framework == "starlette":
+        attach_starlette_interceptor(app, _client, interceptor_options)
+    elif framework == "sanic":
+        attach_sanic_interceptor(app, _client, interceptor_options)
+    elif framework == "falcon":
+        attach_falcon_interceptor(app, _client, interceptor_options)
+    elif framework == "bottle":
+        attach_bottle_interceptor(app, _client, interceptor_options)
+    elif framework == "aiohttp":
+        attach_aiohttp_interceptor(app, _client, interceptor_options)
+    elif framework == "tornado":
+        attach_tornado_interceptor(app, _client, interceptor_options)
+    elif framework == "pyramid":
+        attach_pyramid_interceptor(app, _client, interceptor_options)
+    elif framework == "cherrypy":
+        attach_cherrypy_interceptor(app, _client, interceptor_options)
     else:
         return
 
@@ -110,8 +152,8 @@ def init(app=None, api_key=None, **options):
             elif framework == "django":
                 endpoints = scan_routes(None, "django")
 
-            else:
-                return
+            # For any other framework with no app object, skip backend scan
+            # but still continue to frontend scan below
 
             if endpoints:
                 missing = [ep for ep in endpoints if ep.get("requestBody") is None and ep["method"] not in ("GET", "DELETE")]
@@ -130,14 +172,12 @@ def init(app=None, api_key=None, **options):
             _client.register_route_patterns(route_patterns)
 
     if framework == "flask":
-        # Scan on startup
         with app.app_context():
             t = threading.Thread(target=_run_scan, daemon=False)
             t.start()
             t.join(timeout=15)
             app._botversion_scanned = True
 
-        # Keep after_request as fallback for runtime detection
         @app.after_request
         def _botversion_first_scan(response):
             if not getattr(app, '_botversion_scanned', False):
@@ -156,7 +196,6 @@ def init(app=None, api_key=None, **options):
                 t.start()
                 t.join(timeout=15)
 
-        # Keep middleware as fallback for runtime detection
         @app.middleware("http")
         async def _botversion_first_scan(request, call_next):
             if not getattr(app, '_botversion_scanned', False):
@@ -174,9 +213,15 @@ def init(app=None, api_key=None, **options):
                 t.start()
                 t.join(timeout=15)
         except Exception:
-            t = threading.Timer(2.0, _run_scan)
+            t = threading.Timer(3.0, _run_scan)
             t.daemon = False
             t.start()
+
+    elif framework in ("starlette", "sanic", "falcon", "bottle",
+                       "aiohttp", "tornado", "pyramid", "cherrypy"):
+        t = threading.Timer(3.0, _run_scan)
+        t.daemon = False
+        t.start()
 
 
 def get_endpoints():
@@ -198,11 +243,32 @@ def register_endpoint(endpoint):
 def _detect_framework(app):
     if app is not None:
         app_type = type(app).__module__ + "." + type(app).__name__
+
+        # ── Existing ──────────────────────────────────────────────────────
         if "fastapi" in app_type.lower():
             return "fastapi"
         if "flask" in app_type.lower():
             return "flask"
 
+        # ── NEW ───────────────────────────────────────────────────────────
+        if "starlette" in app_type.lower():
+            return "starlette"
+        if "sanic" in app_type.lower():
+            return "sanic"
+        if "falcon" in app_type.lower():
+            return "falcon"
+        if "bottle" in app_type.lower():
+            return "bottle"
+        if "aiohttp" in app_type.lower():
+            return "aiohttp"
+        if "tornado" in app_type.lower():
+            return "tornado"
+        if "pyramid" in app_type.lower():
+            return "pyramid"
+        if "cherrypy" in app_type.lower():
+            return "cherrypy"
+
+    # ── No app object passed — try detecting from imported modules ────────
     if app is None:
         if "django" in sys.modules:
             try:
@@ -212,11 +278,29 @@ def _detect_framework(app):
             except Exception:
                 pass
 
+    # ── Fallback — check sys.modules ──────────────────────────────────────
     if "fastapi" in sys.modules:
         return "fastapi"
     if "flask" in sys.modules:
         return "flask"
     if "django" in sys.modules:
         return "django"
+    # ── NEW fallbacks ─────────────────────────────────────────────────────
+    if "starlette" in sys.modules:
+        return "starlette"
+    if "sanic" in sys.modules:
+        return "sanic"
+    if "falcon" in sys.modules:
+        return "falcon"
+    if "bottle" in sys.modules:
+        return "bottle"
+    if "aiohttp" in sys.modules:
+        return "aiohttp"
+    if "tornado" in sys.modules:
+        return "tornado"
+    if "pyramid" in sys.modules:
+        return "pyramid"
+    if "cherrypy" in sys.modules:
+        return "cherrypy"
 
     return None

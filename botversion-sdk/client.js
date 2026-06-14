@@ -154,6 +154,19 @@ BotVersionClient.prototype._post = function (path, data) {
 
       res.on("end", function () {
         try {
+          if (!responseData || responseData.trim() === "") {
+            if (res.statusCode >= 200 && res.statusCode < 300) {
+              resolve({});
+              return;
+            } else {
+              reject(
+                new Error(
+                  "Platform returned " + res.statusCode + ": empty response",
+                ),
+              );
+              return;
+            }
+          }
           var parsed = JSON.parse(responseData);
           if (res.statusCode >= 200 && res.statusCode < 300) {
             resolve(parsed);
@@ -218,6 +231,19 @@ BotVersionClient.prototype._get = function (path) {
 
       res.on("end", function () {
         try {
+          if (!responseData || responseData.trim() === "") {
+            if (res.statusCode >= 200 && res.statusCode < 300) {
+              resolve({});
+              return;
+            } else {
+              reject(
+                new Error(
+                  "Platform returned " + res.statusCode + ": empty response",
+                ),
+              );
+              return;
+            }
+          }
           var parsed = JSON.parse(responseData);
           if (res.statusCode >= 200 && res.statusCode < 300) {
             resolve(parsed);
@@ -232,7 +258,11 @@ BotVersionClient.prototype._get = function (path) {
             );
           }
         } catch (e) {
-          reject(new Error("Invalid JSON response from platform"));
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            resolve({});
+          } else {
+            reject(new Error("Invalid JSON response from platform"));
+          }
         }
       });
     });

@@ -852,9 +852,8 @@ function scanConfigBasedRoutes(cwd) {
   const patterns = [];
   const seen = new Set();
 
-  // Files to scan for route definitions
   const filesToCheck = [
-    // React Router — common file names
+    // React Router
     path.join(cwd, "src", "App.jsx"),
     path.join(cwd, "src", "App.tsx"),
     path.join(cwd, "src", "App.js"),
@@ -874,7 +873,45 @@ function scanConfigBasedRoutes(cwd) {
     // Angular
     path.join(cwd, "src", "app", "app-routing.module.ts"),
     path.join(cwd, "src", "app", "app.routes.ts"),
+    // TanStack Router
+    path.join(cwd, "src", "routes.tsx"),
+    path.join(cwd, "src", "routeTree.gen.ts"),
+    path.join(cwd, "src", "router.tsx"),
   ];
+
+  // Also scan any file named *routes* or *router* anywhere in src/
+  const srcDir = path.join(cwd, "src");
+  if (fs.existsSync(srcDir)) {
+    function findRouteFiles(dir, depth) {
+      if (depth > 3) return;
+      let entries;
+      try {
+        entries = fs.readdirSync(dir);
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (["node_modules", ".git", "dist", "build"].includes(entry)) continue;
+        const fullPath = path.join(dir, entry);
+        let stat;
+        try {
+          stat = fs.statSync(fullPath);
+        } catch {
+          continue;
+        }
+        if (stat.isDirectory()) {
+          findRouteFiles(fullPath, depth + 1);
+        } else if (
+          /\.(js|ts|jsx|tsx)$/.test(entry) &&
+          /route|router/i.test(entry) &&
+          !filesToCheck.includes(fullPath)
+        ) {
+          filesToCheck.push(fullPath);
+        }
+      }
+    }
+    findRouteFiles(srcDir, 0);
+  }
 
   for (const filePath of filesToCheck) {
     if (!fs.existsSync(filePath)) continue;
@@ -905,6 +942,32 @@ function scanConfigBasedRoutes(cwd) {
       /\{\s*path\s*:\s*["']([^"']+)["']/g,
     );
     for (const match of angularRouteMatches) {
+      addConfigPattern(match[1], seen, patterns);
+    }
+
+    // Pattern 4 — TanStack Router: createRoute({ path: '/dashboard/:id' })
+    const tanstackMatches = content.matchAll(
+      /createRoute\s*\(\s*\{[^}]*path\s*:\s*["']([^"']+)["']/g,
+    );
+    for (const match of tanstackMatches) {
+      addConfigPattern(match[1], seen, patterns);
+    }
+
+    // Pattern 5 — TanStack Router file-based: createFileRoute('/dashboard/$id')
+    const tanstackFileMatches = content.matchAll(
+      /createFileRoute\s*\(\s*["']([^"']+)["']/g,
+    );
+    for (const match of tanstackFileMatches) {
+      // Convert TanStack $param to :param
+      const normalized = match[1].replace(/\$([a-zA-Z_][a-zA-Z0-9_]*)/g, ":$1");
+      addConfigPattern(normalized, seen, patterns);
+    }
+
+    // Pattern 6 — Vue Router with children
+    const vueChildrenMatches = content.matchAll(
+      /children\s*:\s*\[[^\]]*path\s*:\s*["']([^"']+)["']/g,
+    );
+    for (const match of vueChildrenMatches) {
       addConfigPattern(match[1], seen, patterns);
     }
   }
@@ -938,32 +1001,274 @@ function addConfigPattern(routePath, seen, patterns) {
   patterns.push({ pattern: normalized, params: paramMap });
 }
 
+function findAllFrontendDirs(cwd) {
+  const fs = require("fs");
+  const path = require("path");
+
+  const FRONTEND_INDICATORS = [
+    "next.config.js",
+    "next.config.ts",
+    "react-router.config.ts",
+    "react-router.config.js",
+    "vite.config.ts",
+    "vite.config.js",
+    "nuxt.config.ts",
+    "nuxt.config.js",
+    "svelte.config.js",
+    "svelte.config.ts",
+    "remix.config.js",
+    "remix.config.ts",
+    "angular.json",
+    "astro.config.mjs",
+    "astro.config.ts",
+    "astro.config.js",
+    "app.config.ts",
+    "qwik.config.ts",
+  ];
+
+  const SKIP_DIRS = new Set([
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    "coverage",
+  ]);
+
+  const found = [];
+
+  function isFrontendDir(dir) {
+    // Check 1 — indicator files (most reliable)
+    const hasIndicator = FRONTEND_INDICATORS.some(function (indicator) {
+      try {
+        return fs.existsSync(path.join(dir, indicator));
+      } catch {
+        return false;
+      }
+    });
+    if (hasIndicator) return true;
+
+    // Check 2 — fallback: check package.json for frontend frameworks
+    try {
+      const pkgPath = path.join(dir, "package.json");
+      if (fs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+        const deps = Object.assign(
+          {},
+          pkg.dependencies || {},
+          pkg.devDependencies || {},
+        );
+        const frontendPackages = [
+          "react",
+          "vue",
+          "angular",
+          "@angular/core",
+          "svelte",
+          "solid-js",
+          "preact",
+          "nuxt",
+          "@remix-run/react",
+          "next",
+          "@sveltejs/kit",
+          "astro",
+          "gatsby",
+          "@solidjs/start",
+          "@builder.io/qwik",
+          "@builder.io/qwik-city",
+        ];
+        if (
+          frontendPackages.some(function (p) {
+            return deps[p];
+          })
+        ) {
+          return true;
+        }
+      }
+    } catch {
+      // silent fail
+    }
+
+    return false;
+  }
+
+  // Always check cwd itself first
+  if (isFrontendDir(cwd)) {
+    found.push(cwd);
+  }
+
+  // ── Step 1: Scan subfolders inside cwd ──────────────────────────────
+  let cwdEntries;
+  try {
+    cwdEntries = fs.readdirSync(cwd);
+  } catch {
+    cwdEntries = [];
+  }
+
+  for (const entry of cwdEntries) {
+    if (SKIP_DIRS.has(entry)) continue;
+
+    const sub = path.join(cwd, entry);
+    let stat;
+    try {
+      stat = fs.statSync(sub);
+    } catch {
+      continue;
+    }
+    if (!stat.isDirectory()) continue;
+
+    // Level 1 — direct subfolders of cwd
+    if (isFrontendDir(sub) && !found.includes(sub)) {
+      found.push(sub);
+    }
+
+    // Level 2 — one level deeper (e.g. packages/apps/frontend)
+    let subEntries;
+    try {
+      subEntries = fs.readdirSync(sub);
+    } catch {
+      continue;
+    }
+
+    for (const subEntry of subEntries) {
+      if (SKIP_DIRS.has(subEntry)) continue;
+      const subSub = path.join(sub, subEntry);
+      let subStat;
+      try {
+        subStat = fs.statSync(subSub);
+      } catch {
+        continue;
+      }
+      if (!subStat.isDirectory()) continue;
+      if (isFrontendDir(subSub) && !found.includes(subSub)) {
+        found.push(subSub);
+      }
+    }
+  }
+
+  // ── Step 2: Walk up exactly 1 level to find sibling folders ─────────
+  // Handles the case where SDK is installed in backend/ but
+  // frontend/ is a sibling folder at the same level
+  const parentDir = path.dirname(cwd);
+  if (parentDir !== cwd) {
+    const UNSAFE_PARENTS = new Set([
+      "Desktop",
+      "Documents",
+      "Downloads",
+      "Pictures",
+      "Videos",
+      "Music",
+      "home",
+      "users",
+      "Users",
+      "var",
+      "www",
+      "srv",
+      "opt",
+      "tmp",
+      "workspace",
+      "Workspace",
+      "projects",
+      "Projects",
+      "code",
+      "Code",
+      "sites",
+      "Sites",
+      "dev",
+      "Dev",
+      "work",
+      "Work",
+    ]);
+
+    if (UNSAFE_PARENTS.has(path.basename(parentDir))) {
+      if (found.length === 0) found.push(cwd);
+      return found;
+    }
+    // Safety check — only scan siblings if the parent folder
+    // looks like a project root (has package.json OR common project folders)
+    // This prevents scanning unrelated projects on the Desktop
+    const parentHasPackageJson = fs.existsSync(
+      path.join(parentDir, "package.json"),
+    );
+    const parentHasCommonProjectFiles =
+      fs.existsSync(path.join(parentDir, "docker-compose.yml")) ||
+      fs.existsSync(path.join(parentDir, "docker-compose.yaml")) ||
+      fs.existsSync(path.join(parentDir, ".env")) ||
+      fs.existsSync(path.join(parentDir, "turbo.json")) ||
+      fs.existsSync(path.join(parentDir, "pnpm-workspace.yaml"));
+
+    // If parent has no signs of being a project root, skip sibling scanning
+    if (!parentHasPackageJson && !parentHasCommonProjectFiles) {
+      // skip — parent is probably just a random folder like Desktop
+    } else {
+      let parentEntries;
+      try {
+        parentEntries = fs.readdirSync(parentDir);
+      } catch {
+        parentEntries = [];
+      }
+
+      for (const entry of parentEntries) {
+        if (SKIP_DIRS.has(entry)) continue;
+
+        const sibling = path.join(parentDir, entry);
+        if (sibling === cwd) continue; // skip cwd itself
+
+        let stat;
+        try {
+          stat = fs.statSync(sibling);
+        } catch {
+          continue;
+        }
+        if (!stat.isDirectory()) continue;
+
+        // Only add if it actually looks like a frontend project
+        if (isFrontendDir(sibling) && !found.includes(sibling)) {
+          found.push(sibling);
+        }
+
+        // Also check one level inside the sibling
+        let siblingEntries;
+        try {
+          siblingEntries = fs.readdirSync(sibling);
+        } catch {
+          continue;
+        }
+
+        for (const siblingEntry of siblingEntries) {
+          if (SKIP_DIRS.has(siblingEntry)) continue;
+          const siblingChild = path.join(sibling, siblingEntry);
+          let siblingChildStat;
+          try {
+            siblingChildStat = fs.statSync(siblingChild);
+          } catch {
+            continue;
+          }
+          if (!siblingChildStat.isDirectory()) continue;
+          if (isFrontendDir(siblingChild) && !found.includes(siblingChild)) {
+            found.push(siblingChild);
+          }
+        }
+      }
+    }
+  }
+
+  // If nothing found, fall back to cwd
+  if (found.length === 0) {
+    found.push(cwd);
+  }
+
+  return found;
+}
+
 function scanFrontendRoutes(cwd) {
   const fs = require("fs");
   const path = require("path");
   const patterns = [];
   const seen = new Set();
 
-  const dirsToScan = [
-    // Next.js Pages Router
-    path.join(cwd, "pages"),
-    path.join(cwd, "src", "pages"),
-    // Next.js App Router
-    path.join(cwd, "app"),
-    path.join(cwd, "src", "app"),
-    // Nuxt.js
-    path.join(cwd, "pages"),
-    // SvelteKit
-    path.join(cwd, "src", "routes"),
-    path.join(cwd, "routes"),
-    // Remix
-    path.join(cwd, "app", "routes"),
-  ];
-  console.log("[botversion:scanner] scanFrontendRoutes called with cwd:", cwd);
-  console.log("[botversion:scanner] Directories to check:");
-  dirsToScan.forEach(function (dir) {
-    console.log("  ", dir, "→ exists:", require("fs").existsSync(dir));
-  });
+  const candidateDirs = findAllFrontendDirs(cwd);
+  console.log("[botversion:scanner] Frontend candidate dirs:", candidateDirs);
 
   function walkDir(dir, routeSegments) {
     if (!fs.existsSync(dir)) return;
@@ -984,10 +1289,9 @@ function scanFrontendRoutes(cwd) {
       }
 
       if (stat.isDirectory()) {
-        if (file === "api") return; // skip API routes
-        if (file.startsWith("_")) return; // skip Next.js internals
+        if (file === "api") return;
+        if (file.startsWith("_")) return;
         if (/^\(.*\)$/.test(file)) {
-          // route groups like (marketing) — don't add to URL
           walkDir(fullPath, routeSegments);
           return;
         }
@@ -997,12 +1301,11 @@ function scanFrontendRoutes(cwd) {
         return;
       }
 
-      if (!/\.(js|ts|jsx|tsx|vue|svelte)$/.test(file)) return;
+      if (!/\.(js|ts|jsx|tsx|vue|svelte|astro)$/.test(file)) return;
       if (file.startsWith("_")) return;
 
-      const routeName = file.replace(/\.(js|ts|jsx|tsx|vue|svelte)$/, "");
+      const routeName = file.replace(/\.(js|ts|jsx|tsx|vue|svelte|astro)$/, "");
 
-      // Skip non-page files
       if (
         ["layout", "loading", "error", "template", "not-found"].includes(
           routeName,
@@ -1010,16 +1313,13 @@ function scanFrontendRoutes(cwd) {
       )
         return;
 
-      // SvelteKit uses +page.svelte — skip +layout, +error etc.
       if (routeName.startsWith("+") && routeName !== "+page") return;
 
-      // Remix uses dots as path separators — e.g. $projectId.dashboard.tsx → /:projectId/dashboard
       const isRemixRoute =
         routeName.includes(".") && !routeName.startsWith("+");
       let finalSegments;
 
       if (isRemixRoute) {
-        // Split by dots and convert each segment
         const remixSegments = routeName
           .split(".")
           .map((s) => convertNextJsSegment(s) || s);
@@ -1041,28 +1341,960 @@ function scanFrontendRoutes(cwd) {
       seen.add(pattern);
 
       const paramMap = extractParamPositions(finalSegments);
-      if (Object.keys(paramMap).length === 0) return; // no dynamic params, skip static routes
+      if (Object.keys(paramMap).length === 0) return;
 
       patterns.push({ pattern, params: paramMap });
     });
   }
 
-  dirsToScan.forEach(function (dir) {
-    if (fs.existsSync(dir)) walkDir(dir, []);
-  });
+  for (const candidate of candidateDirs) {
+    const dirsToScan = [
+      // Next.js
+      path.join(candidate, "pages"),
+      path.join(candidate, "src", "pages"),
+      path.join(candidate, "app"),
+      path.join(candidate, "src", "app"),
+      // React Router / Remix
+      path.join(candidate, "src", "routes"),
+      path.join(candidate, "routes"),
+      path.join(candidate, "app", "routes"),
+      // SvelteKit
+      path.join(candidate, "src", "routes"),
+      // Nuxt
+      path.join(candidate, "pages"),
+      path.join(candidate, "src", "pages"),
+      // Astro
+      path.join(candidate, "src", "pages"),
+    ];
 
-  // Also scan config-based frameworks (React Router, Vue Router, Angular)
-  const configPatterns = scanConfigBasedRoutes(cwd);
-  configPatterns.forEach(function (p) {
-    if (!seen.has(p.pattern)) {
-      seen.add(p.pattern);
-      patterns.push(p);
-    }
-  });
+    dirsToScan.forEach(function (dir) {
+      if (fs.existsSync(dir)) {
+        console.log("[botversion:scanner] Scanning dir:", dir);
+        walkDir(dir, []);
+      }
+    });
 
-  console.log("[botversion:scanner] Total patterns found:", patterns.length);
+    const configPatterns = scanConfigBasedRoutes(candidate);
+    configPatterns.forEach(function (p) {
+      if (!seen.has(p.pattern)) {
+        seen.add(p.pattern);
+        patterns.push(p);
+      }
+    });
+  }
 
+  console.log(
+    "[botversion:scanner] Total frontend patterns found:",
+    patterns.length,
+  );
   return patterns;
+}
+
+/**
+ * Scans Fastify routes from the codebase statically
+ * Handles:
+ * - fastify.get('/path', handler)
+ * - fastify.post('/path', handler)
+ * - fastify.route({ method: 'GET', url: '/path' })
+ * - fastify.register(plugin, { prefix: '/api' })
+ */
+function scanFastifyRoutes(cwd) {
+  const fs = require("fs");
+  const path = require("path");
+  const endpoints = [];
+  const seen = new Set();
+
+  const SKIP_DIRS = [
+    "node_modules",
+    ".git",
+    ".next",
+    "dist",
+    "build",
+    ".cache",
+    "coverage",
+    "out",
+  ];
+
+  // Build body map from all files upfront
+  const bodyMap = cwd ? buildBodyMap(cwd) : {};
+
+  function walk(dir, depth) {
+    if (depth > 4) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (SKIP_DIRS.includes(entry)) continue;
+      const fullPath = path.join(dir, entry);
+      let stat;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        continue;
+      }
+
+      if (stat.isDirectory()) {
+        walk(fullPath, depth + 1);
+        continue;
+      }
+
+      if (!/\.(js|ts)$/.test(entry)) continue;
+
+      let content;
+      try {
+        content = fs.readFileSync(fullPath, "utf8");
+      } catch {
+        continue;
+      }
+
+      // Only process files that look like Fastify route files
+      const isFastifyFile =
+        content.includes("fastify") ||
+        content.includes("Fastify") ||
+        /\.(get|post|put|delete|patch|route)\s*\(/.test(content);
+
+      if (!isFastifyFile) continue;
+
+      // Pattern 1 — fastify.get('/path', handler)
+      // Pattern 2 — fastify.post('/path', handler)
+      const shorthandPattern =
+        /(?:fastify|app|server|router)\.(get|post|put|delete|patch)\s*\(\s*['"`]([^'"`]+)['"`]/gi;
+
+      let match;
+      while ((match = shorthandPattern.exec(content)) !== null) {
+        const method = match[1].toUpperCase();
+        const routePath = match[2];
+        if (routePath.includes("*")) continue;
+
+        const key = method + ":" + routePath;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const needsBody = ["POST", "PUT", "PATCH"].includes(method);
+        const bodyFields = needsBody
+          ? extractBodyFieldsFromFile(content)
+          : null;
+        const routeParamMap = buildRouteParamMap(routePath, []);
+
+        endpoints.push({
+          method,
+          path: routePath,
+          description: "",
+          requestBody: bodyFields,
+          routeParamMap,
+          detectedBy: "static-scan-fastify",
+        });
+      }
+
+      // Pattern 3 — fastify.route({ method: 'GET', url: '/path' })
+      const routeObjectPattern =
+        /\.route\s*\(\s*\{[^}]*method\s*:\s*['"`]([^'"`]+)['"`][^}]*url\s*:\s*['"`]([^'"`]+)['"`]/gi;
+
+      while ((match = routeObjectPattern.exec(content)) !== null) {
+        const method = match[1].toUpperCase();
+        const routePath = match[2];
+        if (routePath.includes("*")) continue;
+
+        const key = method + ":" + routePath;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const needsBody = ["POST", "PUT", "PATCH"].includes(method);
+        const bodyFields = needsBody
+          ? extractBodyFieldsFromFile(content)
+          : null;
+        const routeParamMap = buildRouteParamMap(routePath, []);
+
+        endpoints.push({
+          method,
+          path: routePath,
+          description: "",
+          requestBody: bodyFields,
+          routeParamMap,
+          detectedBy: "static-scan-fastify",
+        });
+      }
+
+      // Pattern 4 — fastify.route({ method: ['GET', 'POST'], url: '/path' })
+      // handles array of methods
+      const routeArrayPattern =
+        /\.route\s*\(\s*\{[^}]*method\s*:\s*\[([^\]]+)\][^}]*url\s*:\s*['"`]([^'"`]+)['"`]/gi;
+
+      while ((match = routeArrayPattern.exec(content)) !== null) {
+        const methodsRaw = match[1];
+        const routePath = match[2];
+        if (routePath.includes("*")) continue;
+
+        const methods = methodsRaw
+          .split(",")
+          .map((m) => m.trim().replace(/['"`]/g, "").toUpperCase())
+          .filter(Boolean);
+
+        for (const method of methods) {
+          const key = method + ":" + routePath;
+          if (seen.has(key)) continue;
+          seen.add(key);
+
+          const needsBody = ["POST", "PUT", "PATCH"].includes(method);
+          const bodyFields = needsBody
+            ? extractBodyFieldsFromFile(content)
+            : null;
+          const routeParamMap = buildRouteParamMap(routePath, []);
+
+          endpoints.push({
+            method,
+            path: routePath,
+            description: "",
+            requestBody: bodyFields,
+            routeParamMap,
+            detectedBy: "static-scan-fastify",
+          });
+        }
+      }
+    }
+  }
+
+  walk(cwd, 0);
+  return endpoints;
+}
+
+/**
+ * Scans NestJS routes from the codebase statically
+ * Handles:
+ * - @Controller('/users')
+ * - @Get('/path')
+ * - @Post('/path')
+ * - @Put('/path')
+ * - @Delete('/path')
+ * - @Patch('/path')
+ */
+function scanNestJsRoutes(cwd) {
+  const fs = require("fs");
+  const path = require("path");
+  const endpoints = [];
+  const seen = new Set();
+
+  const SKIP_DIRS = [
+    "node_modules",
+    ".git",
+    ".next",
+    "dist",
+    "build",
+    ".cache",
+    "coverage",
+    "out",
+  ];
+
+  function walk(dir, depth) {
+    if (depth > 4) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (SKIP_DIRS.includes(entry)) continue;
+      const fullPath = path.join(dir, entry);
+      let stat;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        continue;
+      }
+
+      if (stat.isDirectory()) {
+        walk(fullPath, depth + 1);
+        continue;
+      }
+
+      if (!/\.(ts|js)$/.test(entry)) continue;
+
+      let content;
+      try {
+        content = fs.readFileSync(fullPath, "utf8");
+      } catch {
+        continue;
+      }
+
+      // Only process files that look like NestJS controller files
+      const isNestFile =
+        content.includes("@Controller") ||
+        content.includes("@Get(") ||
+        content.includes("@Post(") ||
+        content.includes("@Put(") ||
+        content.includes("@Delete(") ||
+        content.includes("@Patch(");
+
+      if (!isNestFile) continue;
+
+      // Extract controller prefix — @Controller('/users') or @Controller('users')
+      let controllerPrefix = "";
+      const controllerMatch = content.match(
+        /@Controller\s*\(\s*['"`]([^'"`]*)['"`]\s*\)/,
+      );
+      if (controllerMatch) {
+        controllerPrefix = controllerMatch[1].startsWith("/")
+          ? controllerMatch[1]
+          : "/" + controllerMatch[1];
+      }
+
+      // Extract all method decorators
+      const methodPattern =
+        /@(Get|Post|Put|Delete|Patch)\s*\(\s*['"`]?([^'"`\s\)]*?)['"`]?\s*\)/gi;
+
+      let match;
+      while ((match = methodPattern.exec(content)) !== null) {
+        const method = match[1].toUpperCase();
+        const methodPath = match[2] || "";
+
+        const routeFull =
+          controllerPrefix +
+          (methodPath
+            ? methodPath.startsWith("/")
+              ? methodPath
+              : "/" + methodPath
+            : "");
+
+        const normalizedPath = routeFull.replace(
+          /:([a-zA-Z_][a-zA-Z0-9_]*)/g,
+          ":$1",
+        );
+
+        const key = method + ":" + normalizedPath;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const needsBody = ["POST", "PUT", "PATCH"].includes(method);
+        const bodyFields = needsBody
+          ? extractBodyFieldsFromFile(content)
+          : null;
+        const routeParamMap = buildRouteParamMap(normalizedPath, []);
+
+        endpoints.push({
+          method,
+          path: normalizedPath,
+          description: "",
+          requestBody: bodyFields,
+          routeParamMap,
+          detectedBy: "static-scan-nestjs",
+        });
+      }
+    }
+  }
+
+  walk(cwd, 0);
+  return endpoints;
+}
+
+/**
+ * Scans Koa routes from the codebase statically
+ * Handles:
+ * - router.get('/path', handler)
+ * - router.post('/path', handler)
+ * - router.put('/path', handler)
+ * - router.delete('/path', handler)
+ * - router.patch('/path', handler)
+ */
+function scanKoaRoutes(cwd) {
+  const fs = require("fs");
+  const path = require("path");
+  const endpoints = [];
+  const seen = new Set();
+
+  const SKIP_DIRS = [
+    "node_modules",
+    ".git",
+    ".next",
+    "dist",
+    "build",
+    ".cache",
+    "coverage",
+    "out",
+  ];
+
+  function walk(dir, depth) {
+    if (depth > 4) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (SKIP_DIRS.includes(entry)) continue;
+      const fullPath = path.join(dir, entry);
+      let stat;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        continue;
+      }
+
+      if (stat.isDirectory()) {
+        walk(fullPath, depth + 1);
+        continue;
+      }
+
+      if (!/\.(js|ts)$/.test(entry)) continue;
+
+      let content;
+      try {
+        content = fs.readFileSync(fullPath, "utf8");
+      } catch {
+        continue;
+      }
+
+      // Only process files that look like Koa route files
+      const isKoaFile =
+        content.includes("koa-router") ||
+        content.includes("@koa/router") ||
+        content.includes("new Router()") ||
+        /router\.(get|post|put|delete|patch)\s*\(/.test(content);
+
+      if (!isKoaFile) continue;
+
+      const routePattern =
+        /router\.(get|post|put|delete|patch)\s*\(\s*['"`]([^'"`]+)['"`]/gi;
+
+      let match;
+      while ((match = routePattern.exec(content)) !== null) {
+        const method = match[1].toUpperCase();
+        const routePath = match[2];
+        if (routePath.includes("*")) continue;
+
+        const key = method + ":" + routePath;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const needsBody = ["POST", "PUT", "PATCH"].includes(method);
+        const bodyFields = needsBody
+          ? extractBodyFieldsFromFile(content)
+          : null;
+        const routeParamMap = buildRouteParamMap(routePath, []);
+
+        endpoints.push({
+          method,
+          path: routePath,
+          description: "",
+          requestBody: bodyFields,
+          routeParamMap,
+          detectedBy: "static-scan-koa",
+        });
+      }
+    }
+  }
+
+  walk(cwd, 0);
+  return endpoints;
+}
+
+/**
+ * Scans Hapi routes from the codebase statically
+ * Handles:
+ * - server.route({ method: 'GET', path: '/path', handler })
+ * - server.route([{ method: 'POST', path: '/path', handler }])
+ */
+function scanHapiRoutes(cwd) {
+  const fs = require("fs");
+  const path = require("path");
+  const endpoints = [];
+  const seen = new Set();
+
+  const SKIP_DIRS = [
+    "node_modules",
+    ".git",
+    ".next",
+    "dist",
+    "build",
+    ".cache",
+    "coverage",
+    "out",
+  ];
+
+  function walk(dir, depth) {
+    if (depth > 4) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (SKIP_DIRS.includes(entry)) continue;
+      const fullPath = path.join(dir, entry);
+      let stat;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        continue;
+      }
+
+      if (stat.isDirectory()) {
+        walk(fullPath, depth + 1);
+        continue;
+      }
+
+      if (!/\.(js|ts)$/.test(entry)) continue;
+
+      let content;
+      try {
+        content = fs.readFileSync(fullPath, "utf8");
+      } catch {
+        continue;
+      }
+
+      const isHapiFile =
+        content.includes("@hapi/hapi") ||
+        content.includes("require('hapi')") ||
+        content.includes('require("hapi")') ||
+        content.includes("server.route(");
+
+      if (!isHapiFile) continue;
+
+      // Pattern — method and path can be in any order inside the object
+      const routePattern =
+        /server\.route\s*\(\s*\{[^}]*method\s*:\s*['"`]([^'"`]+)['"`][^}]*path\s*:\s*['"`]([^'"`]+)['"`]/gi;
+
+      let match;
+      while ((match = routePattern.exec(content)) !== null) {
+        const method = match[1].toUpperCase();
+        const routePath = match[2];
+        if (routePath.includes("*")) continue;
+
+        const key = method + ":" + routePath;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const needsBody = ["POST", "PUT", "PATCH"].includes(method);
+        const bodyFields = needsBody
+          ? extractBodyFieldsFromFile(content)
+          : null;
+        const routeParamMap = buildRouteParamMap(routePath, []);
+
+        endpoints.push({
+          method,
+          path: routePath,
+          description: "",
+          requestBody: bodyFields,
+          routeParamMap,
+          detectedBy: "static-scan-hapi",
+        });
+      }
+    }
+  }
+
+  walk(cwd, 0);
+  return endpoints;
+}
+
+/**
+ * Scans AdonisJS routes from the codebase statically
+ * Handles:
+ * - Route.get('/path', handler)
+ * - Route.post('/path', handler)
+ * - router.get('/path', handler)
+ * - router.post('/path', handler)
+ */
+function scanAdonisRoutes(cwd) {
+  const fs = require("fs");
+  const path = require("path");
+  const endpoints = [];
+  const seen = new Set();
+
+  const SKIP_DIRS = [
+    "node_modules",
+    ".git",
+    ".next",
+    "dist",
+    "build",
+    ".cache",
+    "coverage",
+    "out",
+  ];
+
+  function walk(dir, depth) {
+    if (depth > 4) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (SKIP_DIRS.includes(entry)) continue;
+      const fullPath = path.join(dir, entry);
+      let stat;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        continue;
+      }
+
+      if (stat.isDirectory()) {
+        walk(fullPath, depth + 1);
+        continue;
+      }
+
+      if (!/\.(js|ts)$/.test(entry)) continue;
+
+      let content;
+      try {
+        content = fs.readFileSync(fullPath, "utf8");
+      } catch {
+        continue;
+      }
+
+      const isAdonisFile =
+        content.includes("@adonisjs") ||
+        content.includes("Route.get") ||
+        content.includes("Route.post") ||
+        /(?:Route|router)\.(get|post|put|delete|patch)\s*\(/.test(content);
+
+      if (!isAdonisFile) continue;
+
+      const routePattern =
+        /(?:Route|router)\.(get|post|put|delete|patch)\s*\(\s*['"`]([^'"`]+)['"`]/gi;
+
+      let match;
+      while ((match = routePattern.exec(content)) !== null) {
+        const method = match[1].toUpperCase();
+        const routePath = match[2];
+        if (routePath.includes("*")) continue;
+
+        const key = method + ":" + routePath;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const needsBody = ["POST", "PUT", "PATCH"].includes(method);
+        const bodyFields = needsBody
+          ? extractBodyFieldsFromFile(content)
+          : null;
+        const routeParamMap = buildRouteParamMap(routePath, []);
+
+        endpoints.push({
+          method,
+          path: routePath,
+          description: "",
+          requestBody: bodyFields,
+          routeParamMap,
+          detectedBy: "static-scan-adonis",
+        });
+      }
+    }
+  }
+
+  walk(cwd, 0);
+  return endpoints;
+}
+
+/**
+ * Scans Nuxt server API routes
+ * Handles file-based routing in server/api/ folder
+ * e.g. server/api/users.get.ts → GET /api/users
+ * e.g. server/api/users/[id].delete.ts → DELETE /api/users/:id
+ */
+function scanNuxtServerRoutes(cwd) {
+  const fs = require("fs");
+  const path = require("path");
+  const endpoints = [];
+  const seen = new Set();
+
+  const possibleDirs = [
+    path.join(cwd, "server", "api"),
+    path.join(cwd, "src", "server", "api"),
+  ];
+
+  function walkDir(dir, routePath) {
+    if (!fs.existsSync(dir)) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+
+    entries.forEach(function (file) {
+      const fullPath = path.join(dir, file);
+      let stat;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        return;
+      }
+
+      if (stat.isDirectory()) {
+        const segment = file.replace(/\[([^\]]+)\]/g, ":$1");
+        walkDir(fullPath, routePath + "/" + segment);
+        return;
+      }
+
+      if (!/\.(js|ts)$/.test(file)) return;
+
+      // Nuxt convention: users.get.ts or users.post.ts or just users.ts
+      // Strip extension first
+      let fileName = file.replace(/\.(js|ts)$/, "");
+
+      // Check if method is embedded in filename like users.get or [id].delete
+      const methodMatch = fileName.match(/\.?(get|post|put|delete|patch)$/i);
+      let method = null;
+      if (methodMatch) {
+        method = methodMatch[1].toUpperCase();
+        fileName = fileName.replace(/\.?(get|post|put|delete|patch)$/i, "");
+      }
+
+      // Convert [id] to :id
+      fileName = fileName.replace(/\[([^\]]+)\]/g, ":$1");
+
+      const finalPath =
+        fileName === "index" ? routePath : routePath + "/" + fileName;
+
+      const methods = method ? [method] : ["GET"];
+
+      methods.forEach(function (m) {
+        const key = m + ":" + finalPath;
+        if (seen.has(key)) return;
+        seen.add(key);
+
+        const routeParamMap = buildRouteParamMap(finalPath, []);
+
+        endpoints.push({
+          method: m,
+          path: finalPath,
+          description: "",
+          requestBody: null,
+          routeParamMap,
+          detectedBy: "static-scan-nuxt",
+        });
+      });
+    });
+  }
+
+  for (const dir of possibleDirs) {
+    walkDir(dir, "/api");
+  }
+
+  return endpoints;
+}
+
+/**
+ * Scans SvelteKit server routes
+ * Handles +server.js / +server.ts files in src/routes/
+ * e.g. src/routes/api/users/+server.ts with export function GET() → GET /api/users
+ */
+function scanSvelteKitServerRoutes(cwd) {
+  const fs = require("fs");
+  const path = require("path");
+  const endpoints = [];
+  const seen = new Set();
+
+  const possibleDirs = [
+    path.join(cwd, "src", "routes"),
+    path.join(cwd, "routes"),
+  ];
+
+  function walkDir(dir, routePath) {
+    if (!fs.existsSync(dir)) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+
+    entries.forEach(function (file) {
+      const fullPath = path.join(dir, file);
+      let stat;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        return;
+      }
+
+      if (stat.isDirectory()) {
+        // Convert (group) folders — these are layout groups, not route segments
+        if (/^\(.*\)$/.test(file)) {
+          walkDir(fullPath, routePath);
+          return;
+        }
+        // Convert [param] to :param
+        const segment = file.replace(/\[([^\]]+)\]/g, ":$1");
+        walkDir(fullPath, routePath + "/" + segment);
+        return;
+      }
+
+      // Only process +server.js or +server.ts files
+      if (!/^\+server\.(js|ts)$/.test(file)) return;
+
+      let content;
+      try {
+        content = fs.readFileSync(fullPath, "utf8");
+      } catch {
+        return;
+      }
+
+      // Detect exported HTTP methods
+      const methods = detectAppRouterMethods(content);
+
+      methods.forEach(function (method) {
+        const key = method + ":" + routePath;
+        if (seen.has(key)) return;
+        seen.add(key);
+
+        const needsBody = ["POST", "PUT", "PATCH"].includes(method);
+        const bodyFields = needsBody
+          ? extractBodyFieldsFromFile(content)
+          : null;
+        const routeParamMap = buildRouteParamMap(routePath, []);
+
+        endpoints.push({
+          method,
+          path: routePath || "/",
+          description: "",
+          requestBody: bodyFields,
+          routeParamMap,
+          detectedBy: "static-scan-sveltekit",
+        });
+      });
+    });
+  }
+
+  for (const dir of possibleDirs) {
+    walkDir(dir, "");
+  }
+
+  return endpoints;
+}
+
+/**
+ * Scans Remix server routes
+ * Handles loader (GET) and action (POST/PUT/DELETE/PATCH) exports
+ * in app/routes/ folder
+ * e.g. app/routes/projects.$id.tsx with export async function loader() → GET /projects/:id
+ */
+function scanRemixServerRoutes(cwd) {
+  const fs = require("fs");
+  const path = require("path");
+  const endpoints = [];
+  const seen = new Set();
+
+  const possibleDirs = [
+    path.join(cwd, "app", "routes"),
+    path.join(cwd, "routes"),
+  ];
+
+  function walkDir(dir, prefix) {
+    if (!fs.existsSync(dir)) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+
+    entries.forEach(function (file) {
+      const fullPath = path.join(dir, file);
+      let stat;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        return;
+      }
+
+      if (stat.isDirectory()) {
+        walkDir(fullPath, prefix + "/" + file);
+        return;
+      }
+
+      if (!/\.(js|ts|jsx|tsx)$/.test(file)) return;
+
+      let content;
+      try {
+        content = fs.readFileSync(fullPath, "utf8");
+      } catch {
+        return;
+      }
+
+      // Only process files that have loader or action exports
+      const hasLoader = /export\s+(?:async\s+)?function\s+loader\b/.test(
+        content,
+      );
+      const hasAction = /export\s+(?:async\s+)?function\s+action\b/.test(
+        content,
+      );
+
+      if (!hasLoader && !hasAction) return;
+
+      // Convert Remix filename convention to route path
+      // projects.$id.tsx → /projects/:id
+      // _index.tsx → /
+      let fileName = file.replace(/\.(js|ts|jsx|tsx)$/, "");
+      if (fileName === "_index") fileName = "";
+
+      const routePath =
+        (prefix + "/" + fileName)
+          .replace(/\.\$/g, "/:") // .$param → /:param
+          .replace(/\./g, "/") // remaining dots → slashes
+          .replace(/\/+/g, "/") // clean double slashes
+          .replace(/\/$/, "") || "/";
+
+      if (hasLoader) {
+        const key = "GET:" + routePath;
+        if (!seen.has(key)) {
+          seen.add(key);
+          endpoints.push({
+            method: "GET",
+            path: routePath,
+            description: "",
+            requestBody: null,
+            routeParamMap: buildRouteParamMap(routePath, []),
+            detectedBy: "static-scan-remix",
+          });
+        }
+      }
+
+      if (hasAction) {
+        // action handles POST/PUT/DELETE/PATCH — default to POST
+        // try to detect specific method from content
+        const actionMethods = ["POST", "PUT", "DELETE", "PATCH"].filter((m) =>
+          new RegExp(`request\\.method\\s*===?\\s*['"]${m}['"]`).test(content),
+        );
+
+        const methodsToAdd =
+          actionMethods.length > 0 ? actionMethods : ["POST"];
+
+        methodsToAdd.forEach(function (method) {
+          const key = method + ":" + routePath;
+          if (seen.has(key)) return;
+          seen.add(key);
+
+          const bodyFields = extractBodyFieldsFromFile(content);
+          endpoints.push({
+            method,
+            path: routePath,
+            description: "",
+            requestBody: bodyFields,
+            routeParamMap: buildRouteParamMap(routePath, []),
+            detectedBy: "static-scan-remix",
+          });
+        });
+      }
+    });
+  }
+
+  for (const dir of possibleDirs) {
+    walkDir(dir, "");
+  }
+
+  return endpoints;
 }
 
 module.exports = {
@@ -1071,4 +2303,12 @@ module.exports = {
   scanNextJsAppRoutes,
   extractPathParams,
   scanFrontendRoutes,
+  scanFastifyRoutes,
+  scanNestJsRoutes,
+  scanKoaRoutes,
+  scanHapiRoutes,
+  scanAdonisRoutes,
+  scanNuxtServerRoutes,
+  scanSvelteKitServerRoutes,
+  scanRemixServerRoutes,
 };
