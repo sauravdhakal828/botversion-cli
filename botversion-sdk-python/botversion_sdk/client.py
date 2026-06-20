@@ -11,7 +11,7 @@ class BotVersionClient:
 
     def __init__(self, options):
         self.api_key = options["api_key"]
-        platform_url = options.get("platform_url", "http://localhost:3000")
+        platform_url = options.get("platform_url", "https://botversion.com")
 
         self.platform_url = platform_url
         self.debug = options.get("debug", False)

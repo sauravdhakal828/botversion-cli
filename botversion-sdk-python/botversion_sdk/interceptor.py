@@ -78,6 +78,19 @@ def build_body_structure(body):
             structure[key] = "array"
         elif val is None:
             structure[key] = "null"
+        elif isinstance(val, dict):
+            # Capture one level of nested properties so agent can reconstruct
+            # the object shape — e.g. group: { teamId: null, parentId: null }
+            nested_props = {}
+            for nk, nv in val.items():
+                if nv is None:
+                    nested_props[nk] = {"type": "string"}
+                else:
+                    nested_props[nk] = {"type": type(nv).__name__}
+            if nested_props:
+                structure[key] = {"type": "object", "properties": nested_props}
+            else:
+                structure[key] = "object"
         else:
             structure[key] = type(val).__name__
 
@@ -87,18 +100,74 @@ def build_body_structure(body):
 def body_structure_to_json_schema(body_structure):
     """
     Convert body structure dict to JSON Schema format.
+    Handles both simple types (strings) and nested object descriptors.
     """
     if not body_structure:
         return None
 
     properties = {}
-    for key, type_name in body_structure.items():
-        if type_name in ("[redacted]", "null"):
+    for key, type_or_obj in body_structure.items():
+        # Nested object captured with properties
+        if isinstance(type_or_obj, dict) and "type" in type_or_obj:
+            properties[key] = type_or_obj
+        # Simple type string
+        elif type_or_obj in ("[redacted]", "null"):
             properties[key] = {"type": "string"}
         else:
-            properties[key] = {"type": type_name}
+            properties[key] = {"type": type_or_obj}
 
     return {"type": "object", "properties": properties}
+
+
+def extract_trpc_get_input(path, query_string):
+    """
+    tRPC GET requests send their input as a URL-encoded JSON query parameter
+    called 'input'. This function extracts and parses it.
+    Only activates for tRPC paths with an input param and empty body.
+    Safe for all non-tRPC endpoints — returns None if not applicable.
+    """
+    if "/trpc/" not in path:
+        return None
+    if not query_string or "input=" not in query_string:
+        return None
+
+    try:
+        from urllib.parse import parse_qs, unquote
+        params = parse_qs(query_string)
+        input_param = params.get("input", [None])[0]
+        if not input_param:
+            return None
+
+        decoded = json.loads(unquote(input_param))
+        if not isinstance(decoded, dict):
+            return None
+
+        keys = list(decoded.keys())
+
+        # Format 1 — batched: { "0": { "json": {...} }, "1": { "json": {...} } }
+        is_batch = len(keys) > 0 and all(k.isdigit() for k in keys)
+        if is_batch:
+            merged = {}
+            for k in keys:
+                entry = decoded[k]
+                if isinstance(entry, dict):
+                    # Unwrap { json: {...} } envelope if present
+                    unwrapped = entry.get("json", entry) if isinstance(entry.get("json"), dict) else entry
+                    merged.update(unwrapped)
+            return merged if merged else None
+
+        # Format 2 — single with superjson: { "json": {...}, "meta": {...} }
+        if "json" in decoded and isinstance(decoded["json"], dict):
+            return decoded["json"]
+
+        # Format 3 — already unwrapped: { "group": {...}, "limit": 10 }
+        if "meta" not in decoded and "json" not in decoded:
+            return decoded
+
+    except Exception:
+        pass
+
+    return None
 
 
 def report_endpoint(client, method, path, body_structure, options):
@@ -159,6 +228,12 @@ def attach_fastapi_interceptor(app, client, options):
                             request._receive = receive
                             body_data = _json.loads(body_bytes) if body_bytes else None
                             body_structure = build_body_structure(body_data)
+                            # tRPC GET: input is in URL query param, not body
+                            if not body_structure:
+                                query_string = request.url.query
+                                trpc_body = extract_trpc_get_input(path, query_string)
+                                if trpc_body:
+                                    body_structure = build_body_structure(trpc_body)
                         except Exception:
                             body_structure = None
 
@@ -191,6 +266,11 @@ def attach_flask_interceptor(app, client, options):
 
             try:
                 body_structure = build_body_structure(flask_request.get_json(silent=True))
+                # tRPC GET: input is in URL query param, not body
+                if not body_structure:
+                    trpc_body = extract_trpc_get_input(path, flask_request.query_string.decode("utf-8"))
+                    if trpc_body:
+                        body_structure = build_body_structure(trpc_body)
             except Exception:
                 body_structure = None
 
@@ -222,6 +302,11 @@ class BotVersionDjangoMiddleware:
                 try:
                     body_data = json.loads(request.body) if request.body else None
                     body_structure = build_body_structure(body_data)
+                    # tRPC GET: input is in URL query param, not body
+                    if not body_structure:
+                        trpc_body = extract_trpc_get_input(path, request.META.get("QUERY_STRING", ""))
+                        if trpc_body:
+                            body_structure = build_body_structure(trpc_body)
                 except Exception:
                     body_structure = None
 
@@ -281,6 +366,12 @@ def attach_starlette_interceptor(app, client, options):
                             body_bytes = await request.body()
                             body_data = _json.loads(body_bytes) if body_bytes else None
                             body_structure = build_body_structure(body_data)
+                            # tRPC GET: input is in URL query param, not body
+                            if not body_structure:
+                                query_string = request.url.query
+                                trpc_body = extract_trpc_get_input(path, query_string)
+                                if trpc_body:
+                                    body_structure = build_body_structure(trpc_body)
                         except Exception:
                             body_structure = None
 
@@ -312,6 +403,11 @@ def attach_sanic_interceptor(app, client, options):
             try:
                 body_data = request.json if request.body else None
                 body_structure = build_body_structure(body_data)
+                # tRPC GET: input is in URL query param, not body
+                if not body_structure:
+                    trpc_body = extract_trpc_get_input(path, request.query_string)
+                    if trpc_body:
+                        body_structure = build_body_structure(trpc_body)
             except Exception:
                 body_structure = None
 
@@ -341,6 +437,11 @@ def attach_falcon_interceptor(app, client, options):
                     body_bytes = req.bounded_stream.read()
                     body_data = _json.loads(body_bytes) if body_bytes else None
                     body_structure = build_body_structure(body_data)
+                    # tRPC GET: input is in URL query param, not body
+                    if not body_structure:
+                        trpc_body = extract_trpc_get_input(path, req.query_string)
+                        if trpc_body:
+                            body_structure = build_body_structure(trpc_body)
                     # Put body back so the actual handler can still read it
                     import io
                     req.bounded_stream = io.BytesIO(body_bytes)
@@ -373,6 +474,11 @@ def attach_bottle_interceptor(app, client, options):
             try:
                 body_data = bottle_request.json
                 body_structure = build_body_structure(body_data)
+                # tRPC GET: input is in URL query param, not body
+                if not body_structure:
+                    trpc_body = extract_trpc_get_input(path, bottle_request.query_string)
+                    if trpc_body:
+                        body_structure = build_body_structure(trpc_body)
             except Exception:
                 body_structure = None
 
@@ -405,6 +511,11 @@ def attach_aiohttp_interceptor(app, client, options):
                         body_bytes = await request.read()
                         body_data = _json.loads(body_bytes) if body_bytes else None
                         body_structure = build_body_structure(body_data)
+                        # tRPC GET: input is in URL query param, not body
+                        if not body_structure:
+                            trpc_body = extract_trpc_get_input(path, request.rel_url.query_string)
+                            if trpc_body:
+                                body_structure = build_body_structure(trpc_body)
                     except Exception:
                         body_structure = None
 
@@ -450,6 +561,11 @@ def attach_tornado_interceptor(app, client, options):
                             body_bytes = self.request.body
                             body_data = _json.loads(body_bytes) if body_bytes else None
                             body_structure = build_body_structure(body_data)
+                            # tRPC GET: input is in URL query param, not body
+                            if not body_structure:
+                                trpc_body = extract_trpc_get_input(path, self.request.query)
+                                if trpc_body:
+                                    body_structure = build_body_structure(trpc_body)
                         except Exception:
                             body_structure = None
 
@@ -487,6 +603,11 @@ def botversion_pyramid_tween_factory(handler, registry):
                     try:
                         body_data = request.json_body if request.content_length else None
                         body_structure = build_body_structure(body_data)
+                        # tRPC GET: input is in URL query param, not body
+                        if not body_structure:
+                            trpc_body = extract_trpc_get_input(path, request.query_string)
+                            if trpc_body:
+                                body_structure = build_body_structure(trpc_body)
                     except Exception:
                         body_structure = None
 
@@ -533,6 +654,12 @@ def attach_cherrypy_interceptor(app, client, options):
                 body_bytes = request.body.read() if request.body else None
                 body_data = _json.loads(body_bytes) if body_bytes else None
                 body_structure = build_body_structure(body_data)
+                # tRPC GET: input is in URL query param, not body
+                if not body_structure:
+                    query_string = request.query_string if hasattr(request, "query_string") else ""
+                    trpc_body = extract_trpc_get_input(path, query_string)
+                    if trpc_body:
+                        body_structure = build_body_structure(trpc_body)
                 # Put body back so actual handler can still read it
                 import io
                 request.body = io.BytesIO(body_bytes or b"")

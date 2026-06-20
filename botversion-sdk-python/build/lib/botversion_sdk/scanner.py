@@ -13,6 +13,23 @@ def scan_routes(app, framework):
         result = scan_flask_routes(app)
     elif framework == "django":
         result = scan_django_routes()
+    # ── NEW frameworks ────────────────────────────────────────────────────
+    elif framework == "starlette":
+        result = scan_starlette_routes(app)
+    elif framework == "sanic":
+        result = scan_sanic_routes(app)
+    elif framework == "falcon":
+        result = scan_falcon_routes(app)
+    elif framework == "bottle":
+        result = scan_bottle_routes(app)
+    elif framework == "aiohttp":
+        result = scan_aiohttp_routes(app)
+    elif framework == "tornado":
+        result = scan_tornado_routes(app)
+    elif framework == "pyramid":
+        result = scan_pyramid_routes(app)
+    elif framework == "cherrypy":
+        result = scan_cherrypy_routes(app)
 
     return result
 
@@ -62,10 +79,6 @@ def scan_fastapi_routes(app):
 
     except Exception:
         pass
-
-    for ep in endpoints:
-        if ep.get("requestBody") is None and ep["method"] not in ("GET", "DELETE"):
-            print(f"[botversion:scan] MISSING: {ep['method']} {ep['path']}")
 
     return endpoints
 
@@ -122,10 +135,6 @@ def scan_flask_routes(app):
     except Exception:
         pass
 
-    for ep in endpoints:
-        if ep.get("requestBody") is None and ep["method"] not in ("GET", "DELETE"):
-            print(f"[botversion:scan] MISSING: {ep['method']} {ep['path']}")
-
     return endpoints
 
 
@@ -155,10 +164,6 @@ def scan_django_routes():
         _walk_django_patterns(resolver.url_patterns, "", endpoints, seen)
     except Exception:
         pass
-
-    for ep in endpoints:
-        if ep.get("requestBody") is None and ep["method"] not in ("GET", "DELETE"):
-            print(f"[botversion:scan] MISSING: {ep['method']} {ep['path']}")
 
     return endpoints
 
@@ -855,6 +860,446 @@ def extract_request_body_schema(route, method):
     return None
 
 
+# ── Starlette ─────────────────────────────────────────────────────────────────
+# Starlette is what FastAPI is built on, so route scanning is almost identical
+
+def scan_starlette_routes(app):
+    endpoints = []
+    seen = set()
+
+    try:
+        for route in app.routes:
+            if not hasattr(route, "methods") or not route.methods:
+                continue
+
+            path = route.path
+            if path in ("/docs", "/redoc", "/openapi.json"):
+                continue
+
+            methods = [m for m in route.methods if m not in ("HEAD", "OPTIONS")]
+
+            for method in methods:
+                normalized_path = re.sub(r"\{([^}]+)\}", r":\1", path)
+                normalized_path = normalized_path.rstrip("/") or "/"
+                key = f"{method}:{normalized_path}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                handler_name = getattr(route, "name", None)
+                endpoints.append({
+                    "method": method,
+                    "path": normalized_path,
+                    "description": generate_description(method, normalized_path, handler_name),
+                    "requestBody": None,
+                    "detectedBy": "static-scan",
+                })
+
+    except Exception:
+        pass
+
+    return endpoints
+
+
+# ── Sanic ─────────────────────────────────────────────────────────────────────
+# Sanic stores routes in app.router which has a routes_all dict
+
+def scan_sanic_routes(app):
+    endpoints = []
+    seen = set()
+
+    try:
+        # Sanic 21+ uses app.router.routes
+        routes = getattr(app.router, "routes", None) or getattr(app.router, "routes_all", {})
+
+        # routes can be a dict or a list depending on Sanic version
+        if isinstance(routes, dict):
+            routes = routes.values()
+
+        for route in routes:
+            path = getattr(route, "path", None) or getattr(route, "uri", None)
+            if not path:
+                continue
+
+            # Normalize <param> or <param:type> → :param
+            normalized_path = re.sub(r"<([^:>]+)(?::[^>]+)?>", r":\1", path)
+            normalized_path = normalized_path.rstrip("/") or "/"
+
+            methods = getattr(route, "methods", ["GET"])
+            if not methods:
+                methods = ["GET"]
+
+            for method in methods:
+                method = method.upper()
+                if method in ("HEAD", "OPTIONS"):
+                    continue
+
+                key = f"{method}:{normalized_path}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                handler = getattr(route, "handler", None)
+                handler_name = getattr(handler, "__name__", None)
+
+                endpoints.append({
+                    "method": method,
+                    "path": normalized_path,
+                    "description": generate_description(method, normalized_path, handler_name),
+                    "requestBody": None,
+                    "detectedBy": "static-scan",
+                })
+
+    except Exception:
+        pass
+
+    return endpoints
+
+
+# ── Falcon ────────────────────────────────────────────────────────────────────
+# Falcon stores routes in its router. We walk the router tree to find them.
+
+def scan_falcon_routes(app):
+    endpoints = []
+    seen = set()
+
+    ALL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+
+    try:
+        # Falcon 3.x
+        router = getattr(app, "_router", None)
+        if router is None:
+            return endpoints
+
+        # Walk the router tree
+        def walk_falcon_node(node, prefix=""):
+            path = prefix + (getattr(node, "raw_segment", "") or "")
+            if not path.startswith("/"):
+                path = "/" + path
+
+            resource = getattr(node, "resource", None)
+            if resource is not None:
+                # Check which HTTP methods the resource handles
+                for method in ALL_METHODS:
+                    responder_name = f"on_{method.lower()}"
+                    if hasattr(resource, responder_name):
+                        # Normalize {param} or {param:type} → :param
+                        normalized = re.sub(r"\{([^:}]+)(?::[^}]+)?\}", r":\1", path)
+                        normalized = normalized.rstrip("/") or "/"
+                        key = f"{method}:{normalized}"
+                        if key not in seen:
+                            seen.add(key)
+                            endpoints.append({
+                                "method": method,
+                                "path": normalized,
+                                "description": generate_description(method, normalized, None),
+                                "requestBody": None,
+                                "detectedBy": "static-scan",
+                            })
+
+            for child in getattr(node, "children", []):
+                walk_falcon_node(child, path)
+
+        # Start walking from root node
+        root = getattr(router, "_roots", None) or getattr(router, "root", None)
+        if isinstance(root, list):
+            for r in root:
+                walk_falcon_node(r)
+        elif root:
+            walk_falcon_node(root)
+
+    except Exception:
+        pass
+
+    return endpoints
+
+
+# ── Bottle ────────────────────────────────────────────────────────────────────
+# Bottle stores all routes in app.routes (a list of Route objects)
+
+def scan_bottle_routes(app):
+    endpoints = []
+    seen = set()
+
+    try:
+        for route in app.routes:
+            path = route.rule
+            method = route.method.upper()
+
+            if method in ("HEAD", "OPTIONS"):
+                continue
+            if path in ("/static", "/_"):
+                continue
+
+            # Normalize <param> or <param:type> → :param
+            normalized_path = re.sub(r"<([^:>]+)(?::[^>]+)?>", r":\1", path)
+            normalized_path = normalized_path.rstrip("/") or "/"
+
+            key = f"{method}:{normalized_path}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            handler_name = getattr(route.callback, "__name__", None)
+
+            endpoints.append({
+                "method": method,
+                "path": normalized_path,
+                "description": generate_description(method, normalized_path, handler_name),
+                "requestBody": None,
+                "detectedBy": "static-scan",
+            })
+
+    except Exception:
+        pass
+
+    return endpoints
+
+
+# ── aiohttp ───────────────────────────────────────────────────────────────────
+# aiohttp stores routes in app.router which has a resources() method
+
+def scan_aiohttp_routes(app):
+    endpoints = []
+    seen = set()
+
+    try:
+        for resource in app.router.resources():
+            path = resource.canonical
+            # Normalize {param} → :param
+            normalized_path = re.sub(r"\{([^:}]+)(?::[^}]+)?\}", r":\1", path)
+            normalized_path = normalized_path.rstrip("/") or "/"
+
+            # Each resource has routes with methods
+            for route in resource:
+                method = route.method.upper()
+                if method in ("HEAD", "OPTIONS", "*"):
+                    continue
+
+                key = f"{method}:{normalized_path}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                handler = route.handler
+                handler_name = getattr(handler, "__name__", None)
+
+                endpoints.append({
+                    "method": method,
+                    "path": normalized_path,
+                    "description": generate_description(method, normalized_path, handler_name),
+                    "requestBody": None,
+                    "detectedBy": "static-scan",
+                })
+
+    except Exception:
+        pass
+
+    return endpoints
+
+
+# ── Tornado ───────────────────────────────────────────────────────────────────
+# Tornado stores URL specs in app.handlers. Each spec maps a path to a handler class.
+# The handler class has methods like get(), post() etc. which we detect.
+
+def scan_tornado_routes(app):
+    endpoints = []
+    seen = set()
+
+    ALL_METHODS = ["get", "post", "put", "patch", "delete"]
+
+    try:
+        # Tornado stores handlers as a list of (host_pattern, [URLSpec, ...])
+        handler_list = getattr(app, "handlers", [])
+
+        for host_pattern, url_specs in handler_list:
+            for spec in url_specs:
+                # spec.regex is the compiled URL pattern
+                # spec.handler_class is the RequestHandler subclass
+                raw_path = spec.regex.pattern
+
+                # Clean up regex artifacts → clean path
+                path = raw_path
+                path = re.sub(r"\(\?P<([^>]+)>[^)]+\)", r":\1", path)  # named groups
+                path = re.sub(r"\([^)]+\)", ":param", path)  # unnamed groups
+                path = re.sub(r"[\\^$?]", "", path)  # also remove ?
+                path = re.sub(r"/+", "/", path)  # clean double slashes
+                path = path.rstrip("/") or "/"
+                if not path.startswith("/"):
+                    path = "/" + path
+
+                handler_class = spec.handler_class
+
+                for method_name in ALL_METHODS:
+                    # Skip if the handler only inherits the default 405 method
+                    method_fn = getattr(handler_class, method_name, None)
+                    if method_fn is None:
+                        continue
+                    # Check it's actually overridden (not just the base class stub)
+                    if method_fn.__qualname__.startswith("RequestHandler."):
+                        continue
+
+                    method = method_name.upper()
+                    key = f"{method}:{path}"
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    endpoints.append({
+                        "method": method,
+                        "path": path,
+                        "description": generate_description(method, path, handler_class.__name__),
+                        "requestBody": None,
+                        "detectedBy": "static-scan",
+                    })
+
+    except Exception:
+        pass
+
+    return endpoints
+
+
+# ── Pyramid ───────────────────────────────────────────────────────────────────
+# Pyramid uses an introspector to find all routes and their views.
+
+def scan_pyramid_routes(app):
+    endpoints = []
+    seen = set()
+
+    ALL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+
+    try:
+        registry = getattr(app, "registry", None)
+        if registry is None:
+            return endpoints
+
+        introspector = getattr(registry, "introspector", None)
+        if introspector is None:
+            return endpoints
+
+        # Get all route introspectables
+        for intr in introspector.get_category("routes"):
+            route = intr["introspectable"]
+            path = route.get("pattern", "")
+
+            # Normalize {param} → :param
+            normalized_path = re.sub(r"\{([^:}]+)(?::[^}]+)?\}", r":\1", path)
+            if not normalized_path.startswith("/"):
+                normalized_path = "/" + normalized_path
+            normalized_path = normalized_path.rstrip("/") or "/"
+
+            route_name = route.get("name", "")
+
+            # Try to find request_method predicate for this route
+            related = introspector.related(intr["introspectable"])
+            methods_found = set()
+
+            for rel in related:
+                predicates = rel.get("predicates", "")
+                for method in ALL_METHODS:
+                    if method in str(predicates):
+                        methods_found.add(method)
+
+            # If no method restriction found, assume GET and POST
+            if not methods_found:
+                methods_found = {"GET", "POST"}
+
+            for method in methods_found:
+                key = f"{method}:{normalized_path}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                endpoints.append({
+                    "method": method,
+                    "path": normalized_path,
+                    "description": generate_description(method, normalized_path, route_name),
+                    "requestBody": None,
+                    "detectedBy": "static-scan",
+                })
+
+    except Exception:
+        pass
+
+    return endpoints
+
+
+# ── CherryPy ──────────────────────────────────────────────────────────────────
+# CherryPy uses a tree-based dispatcher. Routes are methods on classes.
+# We walk the mounted apps and find exposed methods.
+
+def scan_cherrypy_routes(app):
+    endpoints = []
+    seen = set()
+
+    HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+
+    try:
+        import cherrypy
+
+        def walk_cherrypy_tree(obj, prefix=""):
+            # Check if this object has exposed methods (HTTP handlers)
+            for method_name in [m.lower() for m in HTTP_METHODS]:
+                fn = getattr(obj, method_name, None)
+                if fn and getattr(fn, "exposed", False):
+                    method = method_name.upper()
+                    path = prefix or "/"
+                    key = f"{method}:{path}"
+                    if key not in seen:
+                        seen.add(key)
+                        endpoints.append({
+                            "method": method,
+                            "path": path,
+                            "description": generate_description(method, path, fn.__name__),
+                            "requestBody": None,
+                            "detectedBy": "static-scan",
+                        })
+
+            # index() is the default handler for the path (like GET /)
+            index_fn = getattr(obj, "index", None)
+            if index_fn and getattr(index_fn, "exposed", False):
+                path = prefix or "/"
+                key = f"GET:{path}"
+                if key not in seen:
+                    seen.add(key)
+                    endpoints.append({
+                        "method": "GET",
+                        "path": path,
+                        "description": generate_description("GET", path, "index"),
+                        "requestBody": None,
+                        "detectedBy": "static-scan",
+                    })
+
+            # Walk child attributes (sub-paths)
+            visited = set()
+
+            for attr_name in dir(obj):
+                if attr_name.startswith("_"):
+                    continue
+                child = getattr(obj, attr_name, None)
+                if child is None:
+                    continue
+                child_id = id(child)
+                if child_id in visited:
+                    continue
+                visited.add(child_id)
+                if hasattr(child, "exposed") or any(
+                    hasattr(child, m.lower()) for m in HTTP_METHODS
+                ):
+                    walk_cherrypy_tree(child, prefix + "/" + attr_name)
+
+        # Walk all mounted apps in cherrypy.tree
+        for script_name, app_entry in cherrypy.tree.apps.items():
+            root = getattr(app_entry, "root", None)
+            if root:
+                walk_cherrypy_tree(root, script_name)
+
+    except Exception:
+        pass
+
+    return endpoints
+
+
 def scan_frontend_routes(cwd):
     import os
 
@@ -864,22 +1309,20 @@ def scan_frontend_routes(cwd):
     # Build a list of all candidate directories to scan
     # This handles: simple projects, monorepos, nested structures
     candidate_dirs = _find_all_frontend_dirs(cwd)
-    print(f"[botversion:scanner] Frontend candidate dirs: {candidate_dirs}")
 
     for candidate in candidate_dirs:
         dirs_to_scan = [
-            os.path.join(candidate, "pages"),
-            os.path.join(candidate, "src", "pages"),
-            os.path.join(candidate, "app"),
-            os.path.join(candidate, "src", "app"),
-            os.path.join(candidate, "src", "routes"),
-            os.path.join(candidate, "routes"),
-            os.path.join(candidate, "app", "routes"),
+            os.path.join(candidate, "pages"),           # Next.js, Nuxt, Gatsby, Astro
+            os.path.join(candidate, "src", "pages"),    # Next.js, Nuxt, Gatsby, Astro (src layout)
+            os.path.join(candidate, "app"),             # Next.js app router
+            os.path.join(candidate, "src", "app"),      # Next.js app router (src layout)
+            os.path.join(candidate, "src", "routes"),   # SvelteKit, Solid Start, Qwik City, Remix
+            os.path.join(candidate, "routes"),          # Remix (alternate)
+            os.path.join(candidate, "app", "routes"),   # Remix (app/routes)
         ]
 
         for base_dir in dirs_to_scan:
             if os.path.isdir(base_dir):
-                print(f"[botversion:scanner] Scanning dir: {base_dir}")
                 _walk_frontend_dir(base_dir, [], patterns, seen)
 
         # Also scan config-based frameworks (React Router, Vue Router, Angular)
@@ -889,7 +1332,6 @@ def scan_frontend_routes(cwd):
                 seen.add(p["pattern"])
                 patterns.append(p)
 
-    print(f"[botversion:scanner] Total frontend patterns found: {len(patterns)}")
     return patterns
 
 
@@ -910,6 +1352,10 @@ def _find_all_frontend_dirs(cwd):
         "svelte.config.js", "svelte.config.ts",
         "remix.config.js", "remix.config.ts",
         "angular.json",
+        "astro.config.mjs", "astro.config.ts", "astro.config.js",
+        "gatsby-config.js", "gatsby-config.ts",
+        "app.config.ts", "app.config.js",  # Solid Start
+        "qwik.config.ts",                  # Qwik City
     }
 
     SKIP_DIRS = {
@@ -938,6 +1384,10 @@ def _find_all_frontend_dirs(cwd):
                     "react", "vue", "angular", "@angular/core",
                     "svelte", "solid-js", "preact", "nuxt",
                     "@remix-run/react", "next", "@sveltejs/kit",
+                    "astro",
+                    "gatsby",
+                    "@solidjs/start",
+                    "@builder.io/qwik-city",
                 ]
                 if any(p in deps for p in frontend_packages):
                     return True
@@ -957,6 +1407,16 @@ def _find_all_frontend_dirs(cwd):
         if parent == current:
             break  # reached filesystem root
         current = parent
+
+        # Skip sibling scanning if parent is a known OS-level or generic folder
+        UNSAFE_PARENTS = {
+            "Desktop", "Documents", "Downloads", "Pictures", "Videos", "Music",
+            "home", "users", "Users", "var", "www", "srv", "opt", "tmp",
+            "workspace", "Workspace", "projects", "Projects", "code", "Code",
+            "sites", "Sites", "dev", "Dev", "work", "Work",
+        }
+        if os.path.basename(current) in UNSAFE_PARENTS:
+            break
 
         # Only scan siblings if parent has signs of being a project root
         parent_has_package_json = os.path.isfile(os.path.join(current, "package.json"))
@@ -1038,13 +1498,13 @@ def _walk_frontend_dir(directory, segments, patterns, seen):
             _walk_frontend_dir(full_path, segments + [segment], patterns, seen)
 
         elif os.path.isfile(full_path):
-            # Only process JS/TS/Vue/Svelte files
-            if not re.search(r"\.(js|ts|jsx|tsx|vue|svelte)$", entry):
+            # Only process JS/TS/Vue/Svelte/Astro files
+            if not re.search(r"\.(js|ts|jsx|tsx|vue|svelte|astro)$", entry):
                 continue
             if entry.startswith("_") or (entry.startswith("+") and not entry.startswith("+page")):
                 continue
 
-            route_name = re.sub(r"\.(js|ts|jsx|tsx|vue|svelte)$", "", entry)
+            route_name = re.sub(r"\.(js|ts|jsx|tsx|vue|svelte|astro)$", "", entry)
 
             if route_name in SKIP_FILES:
                 continue

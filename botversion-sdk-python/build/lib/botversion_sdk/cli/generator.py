@@ -67,7 +67,7 @@ def generate_fastapi_init(info, api_key):
 botversion_sdk.init(
     {app_var},
     api_key=os.environ.get("BOTVERSION_API_KEY"),
-    platform_url=os.environ.get("BOTVERSION_PLATFORM_URL", "http://localhost:3000"),
+    platform_url=os.environ.get("BOTVERSION_PLATFORM_URL", "https://botversion.com"),
     routes_dir={routes_dir},
 )
 """
@@ -90,7 +90,7 @@ def generate_flask_init(info, api_key):
 botversion_sdk.init(
     {app_var},
     api_key=os.environ.get("BOTVERSION_API_KEY"),
-    platform_url=os.environ.get("BOTVERSION_PLATFORM_URL", "http://localhost:3000"),
+    platform_url=os.environ.get("BOTVERSION_PLATFORM_URL", "https://botversion.com"),
     routes_dir={routes_dir},
 )
 """
@@ -111,7 +111,7 @@ import botversion_sdk
 
 botversion_sdk.init(
     api_key=os.environ.get("BOTVERSION_API_KEY"),
-    platform_url=os.environ.get("BOTVERSION_PLATFORM_URL", "http://localhost:3000"),
+    platform_url=os.environ.get("BOTVERSION_PLATFORM_URL", "https://botversion.com"),
     routes_dir={routes_dir},
 )
 """.strip()
@@ -130,7 +130,7 @@ Tornado support is coming soon. For now, add this manually:
     # After defining your handlers:
     botversion_sdk.init(api_key=os.environ.get("BOTVERSION_API_KEY"))
 
-    # See: http://localhost:3000/docs
+    # See: https://botversion.com/docs
 """,
         "aiohttp": f"""
 aiohttp support is coming soon. For now, add this manually:
@@ -140,7 +140,7 @@ aiohttp support is coming soon. For now, add this manually:
 
     botversion_sdk.init(api_key=os.environ.get("BOTVERSION_API_KEY"))
 
-    # See: http://localhost:3000/docs
+    # See: https://botversion.com/docs
 """,
         "sanic": f"""
 Sanic support is coming soon. For now, add this manually:
@@ -150,7 +150,7 @@ Sanic support is coming soon. For now, add this manually:
 
     botversion_sdk.init(app, api_key=os.environ.get("BOTVERSION_API_KEY"))
 
-    # See: http://localhost:3000/docs
+    # See: https://botversion.com/docs
 """,
     }
 
@@ -158,7 +158,7 @@ Sanic support is coming soon. For now, add this manually:
         framework,
         """
 This framework is not yet supported automatically.
-Visit http://localhost:3000/docs for manual setup instructions.
+Visit https://botversion.com/docs for manual setup instructions.
 """
     )
 

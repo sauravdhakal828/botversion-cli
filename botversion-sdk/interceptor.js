@@ -3,6 +3,29 @@
 
 const reportedEndpoints = new Set();
 
+function structureToJsonSchema(bodyStructure) {
+  if (!bodyStructure) return null;
+  return {
+    type: "object",
+    properties: Object.fromEntries(
+      Object.entries(bodyStructure).map(function ([key, typeOrObj]) {
+        if (typeOrObj && typeof typeOrObj === "object" && typeOrObj.type) {
+          return [key, typeOrObj];
+        }
+        return [
+          key,
+          {
+            type:
+              typeOrObj === "null" || typeOrObj === "[redacted]"
+                ? "string"
+                : typeOrObj,
+          },
+        ];
+      }),
+    ),
+  };
+}
+
 /**
  * Attaches a middleware to the Express app that
  * silently intercepts every request and reports
@@ -50,24 +73,7 @@ function attachInterceptor(app, client, options) {
     if (!reportedEndpoints.has(bodyKey)) {
       reportedEndpoints.add(bodyKey);
 
-      const jsonSchema = bodyStructure
-        ? {
-            type: "object",
-            properties: Object.fromEntries(
-              Object.entries(bodyStructure).map(function ([key, type]) {
-                return [
-                  key,
-                  {
-                    type:
-                      type === "null" || type === "[redacted]"
-                        ? "string"
-                        : type,
-                  },
-                ];
-              }),
-            ),
-          }
-        : null;
+      const jsonSchema = structureToJsonSchema(bodyStructure);
 
       // Report async — never block the request
       setImmediate(function () {
@@ -127,11 +133,61 @@ function normalizePath(path) {
 }
 
 /**
+ * Unwraps a single (non-batched) tRPC/superjson envelope.
+ * tRPC sends single calls as { json: {...realFields...} }
+ * or with superjson as { json: {...realFields...}, meta: {...} }
+ */
+function unwrapTrpcJsonEnvelope(obj) {
+  if (
+    obj &&
+    typeof obj === "object" &&
+    !Array.isArray(obj) &&
+    obj.json &&
+    typeof obj.json === "object" &&
+    !Array.isArray(obj.json)
+  ) {
+    return obj.json;
+  }
+  return obj;
+}
+
+/**
  * Extract just the structure of a request body
  * (keys and value types — never actual values for security)
  */
 function buildBodyStructure(body) {
   if (!body || typeof body !== "object") return null;
+
+  // Unwrap tRPC envelope
+  // Case A: single tRPC call — { json: { ...realFields... } } (optionally with a "meta" sibling)
+  // Case B: batched tRPC call — { "0": { json: {...} }, "1": { json: {...} } } or { "0": {...realFields...} }
+  // We detect whichever shape is present and flatten it to the real fields before processing
+  let keys = Object.keys(body);
+
+  const isTrpcEnvelope =
+    keys.length > 0 &&
+    keys.every(function (k) {
+      return (
+        /^\d+$/.test(k) &&
+        body[k] !== null &&
+        typeof body[k] === "object" &&
+        !Array.isArray(body[k])
+      );
+    });
+
+  if (isTrpcEnvelope) {
+    const unwrapped = {};
+    keys.forEach(function (k) {
+      // Each batched entry may itself be a { json: {...} } envelope
+      Object.assign(unwrapped, unwrapTrpcJsonEnvelope(body[k]));
+    });
+    body = unwrapped;
+  } else {
+    // Not a numeric batch — check for the single { json: {...} } shape
+    body = unwrapTrpcJsonEnvelope(body);
+  }
+
+  keys = Object.keys(body);
 
   const structure = {};
 
@@ -163,6 +219,17 @@ function buildBodyStructure(body) {
       structure[key] = "array";
     } else if (val === null) {
       structure[key] = "null";
+    } else if (typeof val === "object") {
+      const nestedProps = {};
+      Object.keys(val).forEach(function (nk) {
+        nestedProps[nk] = {
+          type: val[nk] === null ? "string" : typeof val[nk],
+        };
+      });
+      structure[key] =
+        Object.keys(nestedProps).length > 0
+          ? { type: "object", properties: nestedProps }
+          : "object";
     } else {
       structure[key] = typeof val;
     }
@@ -220,24 +287,91 @@ function attachNextJsInterceptor(client, options) {
             // Helper to send body structure to platform
             function reportBody(bodyObj) {
               try {
-                let parsedBody = null;
-                const structure = buildBodyStructure(bodyObj);
-                if (structure) {
-                  parsedBody = {
-                    type: "object",
-                    properties: Object.fromEntries(
-                      Object.entries(structure).map(([key, type]) => [
-                        key,
-                        {
-                          type:
-                            type === "null" || type === "[redacted]"
-                              ? "string"
-                              : type,
-                        },
-                      ]),
-                    ),
-                  };
+                // ── tRPC GET input extraction ──────────────────────────────────────
+                // tRPC GET requests send their input as a URL-encoded JSON query
+                // parameter called "input". The body is always empty for GET requests.
+                // We only attempt this extraction when:
+                //   1. The body is empty (GET requests have no body)
+                //   2. The URL contains an "input" query parameter
+                //   3. The path looks like a tRPC endpoint (/trpc/)
+                // This prevents accidentally treating regular REST query params
+                // (e.g. ?filter=active&limit=10) as a body schema.
+                const isTrpcPath = path.includes("/trpc/");
+                const hasInputParam = req.url && req.url.includes("input=");
+
+                if (
+                  isTrpcPath &&
+                  hasInputParam &&
+                  (!bodyObj || Object.keys(bodyObj).length === 0)
+                ) {
+                  try {
+                    // Use URL constructor to safely parse query params
+                    const urlObj = new URL(req.url, "http://localhost");
+                    const inputParam = urlObj.searchParams.get("input");
+
+                    if (inputParam) {
+                      let decoded;
+                      try {
+                        decoded = JSON.parse(decodeURIComponent(inputParam));
+                      } catch (e) {
+                        // input param exists but is not valid JSON — skip
+                        decoded = null;
+                      }
+
+                      if (
+                        decoded &&
+                        typeof decoded === "object" &&
+                        !Array.isArray(decoded)
+                      ) {
+                        const keys = Object.keys(decoded);
+
+                        // Format 1 — batched: { "0": { json: {...} }, "1": { json: {...} } }
+                        // All keys are numeric strings
+                        const isBatch =
+                          keys.length > 0 && keys.every((k) => /^\d+$/.test(k));
+
+                        if (isBatch) {
+                          // Merge all batch entries into one flat object
+                          // so we capture the full schema across all procedures
+                          const merged = {};
+                          keys.forEach((k) => {
+                            const entry = decoded[k];
+                            if (entry && typeof entry === "object") {
+                              // Unwrap { json: {...} } envelope if present
+                              const unwrapped =
+                                entry.json && typeof entry.json === "object"
+                                  ? entry.json
+                                  : entry;
+                              Object.assign(merged, unwrapped);
+                            }
+                          });
+                          if (Object.keys(merged).length > 0) {
+                            bodyObj = merged;
+                          }
+                        }
+                        // Format 2 — single with superjson: { json: {...}, meta: {...} }
+                        else if (
+                          decoded.json &&
+                          typeof decoded.json === "object"
+                        ) {
+                          bodyObj = decoded.json;
+                        }
+                        // Format 3 — already unwrapped: { group: {...}, limit: 10 }
+                        // Only use this if it doesn't look like a tRPC envelope
+                        else if (!decoded.meta && !decoded.json) {
+                          bodyObj = decoded;
+                        }
+                      }
+                    }
+                  } catch (e) {
+                    // URL parsing failed — fall through to normal body handling
+                  }
                 }
+
+                // ── Normal body processing (unchanged) ────────────────────────────
+                const parsedBody = structureToJsonSchema(
+                  buildBodyStructure(bodyObj),
+                );
                 client
                   .updateEndpoint({
                     method: method,
@@ -373,19 +507,7 @@ function attachFastifyInterceptor(fastify, client, options) {
     const bodyStructure = buildBodyStructure(body);
     if (!bodyStructure) return;
 
-    const jsonSchema = {
-      type: "object",
-      properties: Object.fromEntries(
-        Object.entries(bodyStructure).map(function ([key, type]) {
-          return [
-            key,
-            {
-              type: type === "null" || type === "[redacted]" ? "string" : type,
-            },
-          ];
-        }),
-      ),
-    };
+    const jsonSchema = structureToJsonSchema(bodyStructure);
 
     setImmediate(function () {
       client
@@ -447,24 +569,7 @@ function attachKoaInterceptor(app, client, options) {
     if (!reportedEndpoints.has(bodyKey)) {
       reportedEndpoints.add(bodyKey);
 
-      const jsonSchema = bodyStructure
-        ? {
-            type: "object",
-            properties: Object.fromEntries(
-              Object.entries(bodyStructure).map(function ([key, type]) {
-                return [
-                  key,
-                  {
-                    type:
-                      type === "null" || type === "[redacted]"
-                        ? "string"
-                        : type,
-                  },
-                ];
-              }),
-            ),
-          }
-        : null;
+      const jsonSchema = structureToJsonSchema(bodyStructure);
 
       setImmediate(function () {
         client
@@ -524,24 +629,7 @@ function attachHapiInterceptor(server, client, options) {
     if (!reportedEndpoints.has(bodyKey)) {
       reportedEndpoints.add(bodyKey);
 
-      const jsonSchema = bodyStructure
-        ? {
-            type: "object",
-            properties: Object.fromEntries(
-              Object.entries(bodyStructure).map(function ([key, type]) {
-                return [
-                  key,
-                  {
-                    type:
-                      type === "null" || type === "[redacted]"
-                        ? "string"
-                        : type,
-                  },
-                ];
-              }),
-            ),
-          }
-        : null;
+      const jsonSchema = structureToJsonSchema(bodyStructure);
 
       setImmediate(function () {
         client

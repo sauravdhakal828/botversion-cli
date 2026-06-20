@@ -257,7 +257,7 @@ function writeSummary(changes) {
   }
 
   lines.push("  Next: Restart your server and test the chat widget.");
-  lines.push("  Docs: http://localhost:3000/docs");
+  lines.push("  Docs: https://botversion.com/docs");
   lines.push("");
 
   return lines.join("\n");

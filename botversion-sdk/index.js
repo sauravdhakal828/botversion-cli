@@ -299,7 +299,7 @@ var BotVersion = {
 
     this._client = new BotVersionClient({
       apiKey: options.apiKey,
-      platformUrl: options.platformUrl || "http://localhost:3000",
+      platformUrl: options.platformUrl || "https://botversion.com",
       debug: options.debug || false,
       timeout: options.timeout || 30000,
     });
@@ -321,8 +321,7 @@ var BotVersion = {
     global._botVersionFramework = detectedBackend;
 
     if (debug) {
-      console.log("[botversion] Detected backend:", detectedBackend);
-      console.log("[botversion] Detected frontend:", detectedFrontend);
+      // Detected: detectedBackend, detectedFrontend
     }
 
     // ── Attach runtime interceptor ───────────────────────────────────────────
@@ -342,16 +341,9 @@ var BotVersion = {
       var routePatterns = scanner.scanFrontendRoutes(cwd);
 
       if (routePatterns.length > 0) {
-        self._client
-          .registerRoutePatterns(routePatterns)
-          .then(function () {
-            console.log("[botversion] ✅ Routes sent to platform successfully");
-          })
-          .catch(function (err) {
-            console.log("[botversion] ❌ Failed to send routes:", err.message);
-          });
-      } else {
-        console.log("[botversion] ⚠️ No frontend routes found — nothing sent");
+        self._client.registerRoutePatterns(routePatterns).catch(function () {
+          // silently ignore — non-critical
+        });
       }
     }, 3000);
   },

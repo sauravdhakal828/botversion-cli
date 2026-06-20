@@ -98,7 +98,7 @@ def init(app=None, api_key=None, **options):
 
     _client = BotVersionClient({
         "api_key": api_key,
-        "platform_url": options.get("platform_url", "http://localhost:3000"),
+        "platform_url": options.get("platform_url", "https://botversion.com"),
         "debug": debug,
         "timeout": options.get("timeout", 30),
         "flush_delay": options.get("flush_delay", 3),
@@ -156,9 +156,6 @@ def init(app=None, api_key=None, **options):
             # but still continue to frontend scan below
 
             if endpoints:
-                missing = [ep for ep in endpoints if ep.get("requestBody") is None and ep["method"] not in ("GET", "DELETE")]
-                for ep in missing:
-                    print(f"[botversion:scan] MISSING: {ep['method']} {ep['path']}")
                 _client.register_endpoints_now(endpoints)
 
         except Exception as e:

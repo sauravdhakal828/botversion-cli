@@ -80,10 +80,6 @@ def scan_fastapi_routes(app):
     except Exception:
         pass
 
-    for ep in endpoints:
-        if ep.get("requestBody") is None and ep["method"] not in ("GET", "DELETE"):
-            print(f"[botversion:scan] MISSING: {ep['method']} {ep['path']}")
-
     return endpoints
 
 
@@ -139,10 +135,6 @@ def scan_flask_routes(app):
     except Exception:
         pass
 
-    for ep in endpoints:
-        if ep.get("requestBody") is None and ep["method"] not in ("GET", "DELETE"):
-            print(f"[botversion:scan] MISSING: {ep['method']} {ep['path']}")
-
     return endpoints
 
 
@@ -172,10 +164,6 @@ def scan_django_routes():
         _walk_django_patterns(resolver.url_patterns, "", endpoints, seen)
     except Exception:
         pass
-
-    for ep in endpoints:
-        if ep.get("requestBody") is None and ep["method"] not in ("GET", "DELETE"):
-            print(f"[botversion:scan] MISSING: {ep['method']} {ep['path']}")
 
     return endpoints
 
@@ -1321,7 +1309,6 @@ def scan_frontend_routes(cwd):
     # Build a list of all candidate directories to scan
     # This handles: simple projects, monorepos, nested structures
     candidate_dirs = _find_all_frontend_dirs(cwd)
-    print(f"[botversion:scanner] Frontend candidate dirs: {candidate_dirs}")
 
     for candidate in candidate_dirs:
         dirs_to_scan = [
@@ -1336,7 +1323,6 @@ def scan_frontend_routes(cwd):
 
         for base_dir in dirs_to_scan:
             if os.path.isdir(base_dir):
-                print(f"[botversion:scanner] Scanning dir: {base_dir}")
                 _walk_frontend_dir(base_dir, [], patterns, seen)
 
         # Also scan config-based frameworks (React Router, Vue Router, Angular)
@@ -1346,7 +1332,6 @@ def scan_frontend_routes(cwd):
                 seen.add(p["pattern"])
                 patterns.append(p)
 
-    print(f"[botversion:scanner] Total frontend patterns found: {len(patterns)}")
     return patterns
 
 

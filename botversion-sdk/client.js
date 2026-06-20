@@ -11,7 +11,7 @@ const url = require("url");
  */
 function BotVersionClient(options) {
   this.apiKey = options.apiKey;
-  this.platformUrl = options.platformUrl || "http://localhost:3000";
+  this.platformUrl = options.platformUrl || "https://botversion.com";
   this.debug = options.debug || false;
   this.timeout = options.timeout || 30000;
 

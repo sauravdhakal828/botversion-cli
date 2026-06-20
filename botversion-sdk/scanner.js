@@ -1268,7 +1268,6 @@ function scanFrontendRoutes(cwd) {
   const seen = new Set();
 
   const candidateDirs = findAllFrontendDirs(cwd);
-  console.log("[botversion:scanner] Frontend candidate dirs:", candidateDirs);
 
   function walkDir(dir, routeSegments) {
     if (!fs.existsSync(dir)) return;
@@ -1369,7 +1368,6 @@ function scanFrontendRoutes(cwd) {
 
     dirsToScan.forEach(function (dir) {
       if (fs.existsSync(dir)) {
-        console.log("[botversion:scanner] Scanning dir:", dir);
         walkDir(dir, []);
       }
     });
@@ -1383,10 +1381,6 @@ function scanFrontendRoutes(cwd) {
     });
   }
 
-  console.log(
-    "[botversion:scanner] Total frontend patterns found:",
-    patterns.length,
-  );
   return patterns;
 }
 
