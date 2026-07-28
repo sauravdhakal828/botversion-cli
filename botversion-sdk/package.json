@@ -1,10 +1,10 @@
 {
   "name": "botversion-sdk",
-  "version": "1.1.7",
+  "version": "2.0.0",
   "description": "BotVersion SDK — auto-detect and register your API endpoints",
   "main": "index.js",
   "bin": {
-    "botversion-sdk": "bin/init.js"
+    "botversion-scan-frontend": "./bin/scan-frontend.js"
   },
   "keywords": [
     "botversion",

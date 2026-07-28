@@ -89,13 +89,14 @@ class BotVersionClient:
 
     # ── Register frontend route patterns ─────────────────────────────────────────
 
-    def register_route_patterns(self, patterns):
-        if not patterns:
+    def register_route_patterns(self, patterns, classification=None):
+        if not patterns and not classification:
             return
         try:
             self._post("/api/sdk/register-route-patterns", {
                 "workspaceKey": self.api_key,
-                "patterns": patterns,
+                "patterns": patterns or [],
+                "classification": classification,
             })
         except Exception as e:
             if self.debug:
@@ -121,6 +122,7 @@ class BotVersionClient:
             headers={
                 "Content-Type": "application/json",
                 "Content-Length": str(len(body)),
+                "X-BotVersion-SDK": "1.0.0-python",
             },
         )
 
@@ -150,6 +152,9 @@ class BotVersionClient:
         req = urllib.request.Request(
             url,
             method="GET",
+            headers={
+                "X-BotVersion-SDK": "1.0.0-python",
+            },
         )
 
         try:

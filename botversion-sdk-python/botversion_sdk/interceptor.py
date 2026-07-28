@@ -212,10 +212,33 @@ def attach_fastapi_interceptor(app, client, options):
         from starlette.requests import Request
         import json as _json
 
+        from starlette.responses import JSONResponse
+
         class BotVersionMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request: Request, call_next):
                 path = request.url.path
                 method = request.method.upper()
+
+                # ── Scan trigger from BotVersion dashboard ───────────────
+                if path == "/__botversion/scan" and method == "POST":
+                    provided_key = request.headers.get("x-botversion-scan-key", "")
+                    if (
+                        options.get("scan_secret")
+                        and provided_key == options["scan_secret"]
+                        and callable(options.get("on_scan_requested"))
+                    ):
+                        try:
+                            result = options["on_scan_requested"]()
+                            return JSONResponse(
+                                {"success": True, "result": result}, status_code=200
+                            )
+                        except Exception as e:
+                            return JSONResponse(
+                                {"success": False, "error": str(e)}, status_code=500
+                            )
+                    return JSONResponse(
+                        {"success": False, "error": "Unauthorized"}, status_code=401
+                    )
 
                 response = await call_next(request)
 
@@ -259,6 +282,21 @@ def attach_flask_interceptor(app, client, options):
             path = flask_request.path
             method = flask_request.method.upper()
 
+            # ── Scan trigger from BotVersion dashboard ───────────────────
+            if path == "/__botversion/scan" and method == "POST":
+                provided_key = flask_request.headers.get("x-botversion-scan-key", "")
+                if (
+                    options.get("scan_secret")
+                    and provided_key == options["scan_secret"]
+                    and callable(options.get("on_scan_requested"))
+                ):
+                    try:
+                        result = options["on_scan_requested"]()
+                        return {"success": True, "result": result}, 200
+                    except Exception as e:
+                        return {"success": False, "error": str(e)}, 500
+                return {"success": False, "error": "Unauthorized"}, 401
+
             if should_ignore(path, options.get("exclude")):
                 return
             if options.get("api_prefix") and not path.startswith(options["api_prefix"]):
@@ -296,6 +334,23 @@ class BotVersionDjangoMiddleware:
     def __call__(self, request):
         path = request.path
         method = request.method.upper()
+        options = self.__class__._options
+
+        # ── Scan trigger from BotVersion dashboard ───────────────────────
+        if path == "/__botversion/scan" and method == "POST":
+            provided_key = request.META.get("HTTP_X_BOTVERSION_SCAN_KEY", "")
+            from django.http import JsonResponse
+            if (
+                options.get("scan_secret")
+                and provided_key == options["scan_secret"]
+                and callable(options.get("on_scan_requested"))
+            ):
+                try:
+                    result = options["on_scan_requested"]()
+                    return JsonResponse({"success": True, "result": result}, status=200)
+                except Exception as e:
+                    return JsonResponse({"success": False, "error": str(e)}, status=500)
+            return JsonResponse({"success": False, "error": "Unauthorized"}, status=401)
 
         if not should_ignore(path, self.__class__._options.get("exclude")):
             if not self.__class__._options.get("api_prefix") or path.startswith(self.__class__._options["api_prefix"]):
@@ -353,10 +408,33 @@ def attach_starlette_interceptor(app, client, options):
         from starlette.requests import Request
         import json as _json
 
+        from starlette.responses import JSONResponse
+
         class BotVersionStarletteMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request: Request, call_next):
                 path = request.url.path
                 method = request.method.upper()
+
+                # ── Scan trigger from BotVersion dashboard ───────────────
+                if path == "/__botversion/scan" and method == "POST":
+                    provided_key = request.headers.get("x-botversion-scan-key", "")
+                    if (
+                        options.get("scan_secret")
+                        and provided_key == options["scan_secret"]
+                        and callable(options.get("on_scan_requested"))
+                    ):
+                        try:
+                            result = options["on_scan_requested"]()
+                            return JSONResponse(
+                                {"success": True, "result": result}, status_code=200
+                            )
+                        except Exception as e:
+                            return JSONResponse(
+                                {"success": False, "error": str(e)}, status_code=500
+                            )
+                    return JSONResponse(
+                        {"success": False, "error": "Unauthorized"}, status_code=401
+                    )
 
                 response = await call_next(request)
 
@@ -395,6 +473,22 @@ def attach_sanic_interceptor(app, client, options):
             path = request.path
             method = request.method.upper()
 
+            # ── Scan trigger from BotVersion dashboard ───────────────────
+            if path == "/__botversion/scan" and method == "POST":
+                from sanic.response import json as sanic_json
+                provided_key = request.headers.get("x-botversion-scan-key", "")
+                if (
+                    options.get("scan_secret")
+                    and provided_key == options["scan_secret"]
+                    and callable(options.get("on_scan_requested"))
+                ):
+                    try:
+                        result = options["on_scan_requested"]()
+                        return sanic_json({"success": True, "result": result}, status=200)
+                    except Exception as e:
+                        return sanic_json({"success": False, "error": str(e)}, status=500)
+                return sanic_json({"success": False, "error": "Unauthorized"}, status=401)
+
             if should_ignore(path, options.get("exclude")):
                 return
             if options.get("api_prefix") and not path.startswith(options["api_prefix"]):
@@ -428,6 +522,27 @@ def attach_falcon_interceptor(app, client, options):
                 path = req.path
                 method = req.method.upper()
 
+                # ── Scan trigger from BotVersion dashboard ───────────────
+                if path == "/__botversion/scan" and method == "POST":
+                    provided_key = req.get_header("x-botversion-scan-key") or ""
+                    if (
+                        options.get("scan_secret")
+                        and provided_key == options["scan_secret"]
+                        and callable(options.get("on_scan_requested"))
+                    ):
+                        try:
+                            result = options["on_scan_requested"]()
+                            resp.media = {"success": True, "result": result}
+                            resp.status = 200
+                        except Exception as e:
+                            resp.media = {"success": False, "error": str(e)}
+                            resp.status = 500
+                    else:
+                        resp.media = {"success": False, "error": "Unauthorized"}
+                        resp.status = 401
+                    resp.complete = True
+                    return
+
                 if should_ignore(path, options.get("exclude")):
                     return
                 if options.get("api_prefix") and not path.startswith(options["api_prefix"]):
@@ -460,11 +575,40 @@ def attach_falcon_interceptor(app, client, options):
 
 def attach_bottle_interceptor(app, client, options):
     try:
-        from bottle import request as bottle_request
+        from bottle import request as bottle_request, HTTPResponse
 
         def botversion_bottle_interceptor():
             path = bottle_request.path
             method = bottle_request.method.upper()
+
+            # ── Scan trigger from BotVersion dashboard ────────────────────
+            if path == "/__botversion/scan" and method == "POST":
+                provided_key = bottle_request.headers.get("x-botversion-scan-key", "")
+                if (
+                    options.get("scan_secret")
+                    and provided_key == options["scan_secret"]
+                    and callable(options.get("on_scan_requested"))
+                ):
+                    try:
+                        result = options["on_scan_requested"]()
+                        raise HTTPResponse(
+                            body=json.dumps({"success": True, "result": result}),
+                            status=200,
+                            headers={"Content-Type": "application/json"},
+                        )
+                    except HTTPResponse:
+                        raise
+                    except Exception as e:
+                        raise HTTPResponse(
+                            body=json.dumps({"success": False, "error": str(e)}),
+                            status=500,
+                            headers={"Content-Type": "application/json"},
+                        )
+                raise HTTPResponse(
+                    body=json.dumps({"success": False, "error": "Unauthorized"}),
+                    status=401,
+                    headers={"Content-Type": "application/json"},
+                )
 
             if should_ignore(path, options.get("exclude")):
                 return
@@ -502,6 +646,28 @@ def attach_aiohttp_interceptor(app, client, options):
         async def botversion_aiohttp_middleware(request, handler):
             path = request.path
             method = request.method.upper()
+
+            # ── Scan trigger from BotVersion dashboard ───────────────────
+            if path == "/__botversion/scan" and method == "POST":
+                from aiohttp import web
+                provided_key = request.headers.get("x-botversion-scan-key", "")
+                if (
+                    options.get("scan_secret")
+                    and provided_key == options["scan_secret"]
+                    and callable(options.get("on_scan_requested"))
+                ):
+                    try:
+                        result = options["on_scan_requested"]()
+                        return web.json_response(
+                            {"success": True, "result": result}, status=200
+                        )
+                    except Exception as e:
+                        return web.json_response(
+                            {"success": False, "error": str(e)}, status=500
+                        )
+                return web.json_response(
+                    {"success": False, "error": "Unauthorized"}, status=401
+                )
 
             response = await handler(request)
 
@@ -548,6 +714,41 @@ def attach_tornado_interceptor(app, client, options):
         import tornado.web
         import json as _json
 
+        original_prepare = tornado.web.RequestHandler.prepare
+
+        def patched_prepare(self):
+            try:
+                path = self.request.path
+                method = self.request.method.upper()
+
+                # ── Scan trigger from BotVersion dashboard ───────────────
+                if path == "/__botversion/scan" and method == "POST":
+                    provided_key = self.request.headers.get("x-botversion-scan-key", "")
+                    if (
+                        options.get("scan_secret")
+                        and provided_key == options["scan_secret"]
+                        and callable(options.get("on_scan_requested"))
+                    ):
+                        try:
+                            result = options["on_scan_requested"]()
+                            self.set_status(200)
+                            self.set_header("Content-Type", "application/json")
+                            self.finish(_json.dumps({"success": True, "result": result}))
+                        except Exception as e:
+                            self.set_status(500)
+                            self.set_header("Content-Type", "application/json")
+                            self.finish(_json.dumps({"success": False, "error": str(e)}))
+                    else:
+                        self.set_status(401)
+                        self.set_header("Content-Type", "application/json")
+                        self.finish(_json.dumps({"success": False, "error": "Unauthorized"}))
+                    return
+            except Exception:
+                pass
+            return original_prepare(self)
+
+        tornado.web.RequestHandler.prepare = patched_prepare
+
         original_finish = tornado.web.RequestHandler.finish
 
         def patched_finish(self, chunk=None):
@@ -592,6 +793,25 @@ _pyramid_options = {}
 
 def botversion_pyramid_tween_factory(handler, registry):
     def botversion_tween(request):
+        path = request.path
+        method = request.method.upper()
+
+        # ── Scan trigger from BotVersion dashboard ────────────────────────
+        if path == "/__botversion/scan" and method == "POST":
+            from pyramid.response import Response
+            provided_key = request.headers.get("x-botversion-scan-key", "")
+            if (
+                _pyramid_options.get("scan_secret")
+                and provided_key == _pyramid_options["scan_secret"]
+                and callable(_pyramid_options.get("on_scan_requested"))
+            ):
+                try:
+                    result = _pyramid_options["on_scan_requested"]()
+                    return Response(json_body={"success": True, "result": result}, status=200)
+                except Exception as e:
+                    return Response(json_body={"success": False, "error": str(e)}, status=500)
+            return Response(json_body={"success": False, "error": "Unauthorized"}, status=401)
+
         response = handler(request)
         try:
             import json as _json
@@ -644,6 +864,30 @@ def attach_cherrypy_interceptor(app, client, options):
             request = cherrypy.request
             path = request.path_info
             method = request.method.upper()
+
+            # ── Scan trigger from BotVersion dashboard ────────────────────
+            if path == "/__botversion/scan" and method == "POST":
+                provided_key = request.headers.get("x-botversion-scan-key", "")
+                if (
+                    options.get("scan_secret")
+                    and provided_key == options["scan_secret"]
+                    and callable(options.get("on_scan_requested"))
+                ):
+                    try:
+                        result = options["on_scan_requested"]()
+                        cherrypy.response.status = 200
+                        body = _json.dumps({"success": True, "result": result})
+                    except Exception as e:
+                        cherrypy.response.status = 500
+                        body = _json.dumps({"success": False, "error": str(e)})
+                else:
+                    cherrypy.response.status = 401
+                    body = _json.dumps({"success": False, "error": "Unauthorized"})
+
+                cherrypy.response.headers["Content-Type"] = "application/json"
+                cherrypy.response.body = body.encode("utf-8")
+                cherrypy.request.handler = None
+                return
 
             if should_ignore(path, options.get("exclude")):
                 return

@@ -1146,112 +1146,13 @@ function findAllFrontendDirs(cwd) {
     }
   }
 
-  // ── Step 2: Walk up exactly 1 level to find sibling folders ─────────
-  // Handles the case where SDK is installed in backend/ but
-  // frontend/ is a sibling folder at the same level
-  const parentDir = path.dirname(cwd);
-  if (parentDir !== cwd) {
-    const UNSAFE_PARENTS = new Set([
-      "Desktop",
-      "Documents",
-      "Downloads",
-      "Pictures",
-      "Videos",
-      "Music",
-      "home",
-      "users",
-      "Users",
-      "var",
-      "www",
-      "srv",
-      "opt",
-      "tmp",
-      "workspace",
-      "Workspace",
-      "projects",
-      "Projects",
-      "code",
-      "Code",
-      "sites",
-      "Sites",
-      "dev",
-      "Dev",
-      "work",
-      "Work",
-    ]);
-
-    if (UNSAFE_PARENTS.has(path.basename(parentDir))) {
-      if (found.length === 0) found.push(cwd);
-      return found;
-    }
-    // Safety check — only scan siblings if the parent folder
-    // looks like a project root (has package.json OR common project folders)
-    // This prevents scanning unrelated projects on the Desktop
-    const parentHasPackageJson = fs.existsSync(
-      path.join(parentDir, "package.json"),
-    );
-    const parentHasCommonProjectFiles =
-      fs.existsSync(path.join(parentDir, "docker-compose.yml")) ||
-      fs.existsSync(path.join(parentDir, "docker-compose.yaml")) ||
-      fs.existsSync(path.join(parentDir, ".env")) ||
-      fs.existsSync(path.join(parentDir, "turbo.json")) ||
-      fs.existsSync(path.join(parentDir, "pnpm-workspace.yaml"));
-
-    // If parent has no signs of being a project root, skip sibling scanning
-    if (!parentHasPackageJson && !parentHasCommonProjectFiles) {
-      // skip — parent is probably just a random folder like Desktop
-    } else {
-      let parentEntries;
-      try {
-        parentEntries = fs.readdirSync(parentDir);
-      } catch {
-        parentEntries = [];
-      }
-
-      for (const entry of parentEntries) {
-        if (SKIP_DIRS.has(entry)) continue;
-
-        const sibling = path.join(parentDir, entry);
-        if (sibling === cwd) continue; // skip cwd itself
-
-        let stat;
-        try {
-          stat = fs.statSync(sibling);
-        } catch {
-          continue;
-        }
-        if (!stat.isDirectory()) continue;
-
-        // Only add if it actually looks like a frontend project
-        if (isFrontendDir(sibling) && !found.includes(sibling)) {
-          found.push(sibling);
-        }
-
-        // Also check one level inside the sibling
-        let siblingEntries;
-        try {
-          siblingEntries = fs.readdirSync(sibling);
-        } catch {
-          continue;
-        }
-
-        for (const siblingEntry of siblingEntries) {
-          if (SKIP_DIRS.has(siblingEntry)) continue;
-          const siblingChild = path.join(sibling, siblingEntry);
-          let siblingChildStat;
-          try {
-            siblingChildStat = fs.statSync(siblingChild);
-          } catch {
-            continue;
-          }
-          if (!siblingChildStat.isDirectory()) continue;
-          if (isFrontendDir(siblingChild) && !found.includes(siblingChild)) {
-            found.push(siblingChild);
-          }
-        }
-      }
-    }
-  }
+  // Note: we intentionally do NOT walk up to sibling folders (e.g. a
+  // separate frontend/ folder next to backend/) anymore. That only worked
+  // in local dev monorepos where both folders live on the same disk. In
+  // production, frontend and backend are frequently on completely separate
+  // servers, so there is nothing to find outside cwd. If this install has
+  // no frontend, classification (in index.js) reports that to the
+  // dashboard instead of guessing at a folder that may not exist here.
 
   // If nothing found, fall back to cwd
   if (found.length === 0) {

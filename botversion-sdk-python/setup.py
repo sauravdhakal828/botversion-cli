@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="botversion-sdk",
-    version="1.1.7",
+    version="2.0.0",
     description="BotVersion SDK — automatically discover and register your API endpoints",
     long_description=open("README.md").read() if __import__("os").path.exists("README.md") else "",
     long_description_content_type="text/markdown",
@@ -20,14 +20,6 @@ setup(
         "fastapi": ["fastapi", "starlette"],
         "flask": ["flask"],
         "django": ["django"],
-    },
-
-    # ── CLI command ───────────────────────────────────────────────────────────
-    # After pip install, user can run: botversion-init --key YOUR_KEY
-    entry_points={
-        "console_scripts": [
-            "botversion-init=botversion_sdk.cli.init:main",
-        ],
     },
 
     classifiers=[

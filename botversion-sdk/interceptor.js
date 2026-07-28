@@ -46,6 +46,39 @@ function attachInterceptor(app, client, options) {
 
   app.use(function botVersionInterceptor(req, res, next) {
     const path = req.path || req.url || "";
+
+    // ── Scan trigger from BotVersion dashboard ───────────────────────────
+    if (path === "/__botversion/scan" && req.method === "POST") {
+      const providedKey = req.headers["x-botversion-scan-key"] || "";
+      if (
+        options.scanSecret &&
+        providedKey === options.scanSecret &&
+        typeof options.onScanRequested === "function"
+      ) {
+        Promise.resolve(options.onScanRequested())
+          .then(function (result) {
+            res.statusCode = 200;
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ success: true, result: result || null }));
+          })
+          .catch(function (err) {
+            res.statusCode = 500;
+            res.setHeader("Content-Type", "application/json");
+            res.end(
+              JSON.stringify({
+                success: false,
+                error: String((err && err.message) || err),
+              }),
+            );
+          });
+      } else {
+        res.statusCode = 401;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ success: false, error: "Unauthorized" }));
+      }
+      return;
+    }
+
     const shouldIgnore = ignorePaths.some(function (p) {
       return path.startsWith(p);
     });
@@ -247,6 +280,40 @@ function attachNextJsInterceptor(client, options) {
       if (event === "request") {
         const path = req.url ? req.url.split("?")[0] : "";
         const method = req.method ? req.method.toUpperCase() : "";
+
+        // ── Scan trigger from BotVersion dashboard ───────────────────────
+        if (path === "/__botversion/scan" && method === "POST") {
+          const providedKey = req.headers["x-botversion-scan-key"] || "";
+          if (
+            options.scanSecret &&
+            providedKey === options.scanSecret &&
+            typeof options.onScanRequested === "function"
+          ) {
+            Promise.resolve(options.onScanRequested())
+              .then(function (result) {
+                res.statusCode = 200;
+                res.setHeader("Content-Type", "application/json");
+                res.end(
+                  JSON.stringify({ success: true, result: result || null }),
+                );
+              })
+              .catch(function (err) {
+                res.statusCode = 500;
+                res.setHeader("Content-Type", "application/json");
+                res.end(
+                  JSON.stringify({
+                    success: false,
+                    error: String((err && err.message) || err),
+                  }),
+                );
+              });
+          } else {
+            res.statusCode = 401;
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ success: false, error: "Unauthorized" }));
+          }
+          return; // handled directly — don't pass through to the app
+        }
 
         const shouldIgnore = (options.exclude || [])
           .concat([
@@ -464,6 +531,29 @@ function attachFastifyInterceptor(fastify, client, options) {
     const path = request.url ? request.url.split("?")[0] : "";
     const method = request.method ? request.method.toUpperCase() : "";
 
+    // ── Scan trigger from BotVersion dashboard ───────────────────────────
+    if (path === "/__botversion/scan" && method === "POST") {
+      const providedKey = request.headers["x-botversion-scan-key"] || "";
+      if (
+        options.scanSecret &&
+        providedKey === options.scanSecret &&
+        typeof options.onScanRequested === "function"
+      ) {
+        try {
+          const result = await options.onScanRequested();
+          reply.code(200).send({ success: true, result: result || null });
+        } catch (err) {
+          reply.code(500).send({
+            success: false,
+            error: String((err && err.message) || err),
+          });
+        }
+      } else {
+        reply.code(401).send({ success: false, error: "Unauthorized" });
+      }
+      return reply;
+    }
+
     const shouldIgnore = ignorePaths.some(function (p) {
       return path.startsWith(p);
     });
@@ -541,10 +631,36 @@ function attachKoaInterceptor(app, client, options) {
   // IMPORTANT: This interceptor must be added AFTER koa-bodyparser middleware
   // so that ctx.request.body is already populated when we read it.
   app.use(async function botVersionKoaInterceptor(ctx, next) {
-    await next();
-
     const path = ctx.path || "";
     const method = ctx.method ? ctx.method.toUpperCase() : "";
+
+    // ── Scan trigger from BotVersion dashboard ───────────────────────────
+    if (path === "/__botversion/scan" && method === "POST") {
+      const providedKey = ctx.headers["x-botversion-scan-key"] || "";
+      if (
+        options.scanSecret &&
+        providedKey === options.scanSecret &&
+        typeof options.onScanRequested === "function"
+      ) {
+        try {
+          const result = await options.onScanRequested();
+          ctx.status = 200;
+          ctx.body = { success: true, result: result || null };
+        } catch (err) {
+          ctx.status = 500;
+          ctx.body = {
+            success: false,
+            error: String((err && err.message) || err),
+          };
+        }
+      } else {
+        ctx.status = 401;
+        ctx.body = { success: false, error: "Unauthorized" };
+      }
+      return; // handled directly — don't call next()
+    }
+
+    await next();
 
     const shouldIgnore = ignorePaths.some(function (p) {
       return path.startsWith(p);
@@ -605,6 +721,38 @@ function attachHapiInterceptor(server, client, options) {
     const path = request.path || "";
     const method = request.method ? request.method.toUpperCase() : "";
 
+    // ── Scan trigger from BotVersion dashboard ───────────────────────────
+    if (path === "/__botversion/scan" && method === "POST") {
+      const providedKey =
+        (request.headers && request.headers["x-botversion-scan-key"]) || "";
+      if (
+        options.scanSecret &&
+        providedKey === options.scanSecret &&
+        typeof options.onScanRequested === "function"
+      ) {
+        return Promise.resolve(options.onScanRequested())
+          .then(function (result) {
+            return h
+              .response({ success: true, result: result || null })
+              .code(200)
+              .takeover();
+          })
+          .catch(function (err) {
+            return h
+              .response({
+                success: false,
+                error: String((err && err.message) || err),
+              })
+              .code(500)
+              .takeover();
+          });
+      }
+      return h
+        .response({ success: false, error: "Unauthorized" })
+        .code(401)
+        .takeover();
+    }
+
     const shouldIgnore = ignorePaths.some(function (p) {
       return path.startsWith(p);
     });
@@ -659,6 +807,8 @@ function attachNestJsInterceptor(client, options) {
     exclude: (options || {}).exclude || [],
     apiPrefix: (options || {}).apiPrefix || "/",
     debug: (options || {}).debug || false,
+    scanSecret: (options || {}).scanSecret,
+    onScanRequested: (options || {}).onScanRequested,
   });
 }
 
@@ -671,6 +821,8 @@ function attachSvelteKitInterceptor(client, options) {
     exclude: (options || {}).exclude || [],
     apiPrefix: (options || {}).apiPrefix || "/",
     debug: (options || {}).debug || false,
+    scanSecret: (options || {}).scanSecret,
+    onScanRequested: (options || {}).onScanRequested,
   });
 }
 
@@ -679,6 +831,8 @@ function attachNuxtInterceptor(client, options) {
     exclude: (options || {}).exclude || [],
     apiPrefix: (options || {}).apiPrefix || "/api",
     debug: (options || {}).debug || false,
+    scanSecret: (options || {}).scanSecret,
+    onScanRequested: (options || {}).onScanRequested,
   });
 }
 
@@ -687,6 +841,8 @@ function attachRemixInterceptor(client, options) {
     exclude: (options || {}).exclude || [],
     apiPrefix: (options || {}).apiPrefix || "/",
     debug: (options || {}).debug || false,
+    scanSecret: (options || {}).scanSecret,
+    onScanRequested: (options || {}).onScanRequested,
   });
 }
 
@@ -695,6 +851,8 @@ function attachAdonisInterceptor(client, options) {
     exclude: (options || {}).exclude || [],
     apiPrefix: (options || {}).apiPrefix || "/",
     debug: (options || {}).debug || false,
+    scanSecret: (options || {}).scanSecret,
+    onScanRequested: (options || {}).onScanRequested,
   });
 }
 

@@ -5,7 +5,7 @@ import builtins
 import os
 
 from .client import BotVersionClient
-from .scanner import scan_routes, scan_frontend_routes
+from .scanner import scan_routes
 from .interceptor import (
     attach_fastapi_interceptor,
     attach_flask_interceptor,
@@ -20,10 +20,62 @@ from .interceptor import (
     attach_cherrypy_interceptor,
 )
 
+def _classify_installation(framework):
+    """
+    Python/PHP SDKs only ever run on a backend server — there is no such
+    thing as a Python or PHP frontend project. So unlike the JS SDK, this
+    is a simple two-way classification: either a supported backend
+    framework was detected, or it wasn't.
+    """
+    if framework:
+        return "backend-only"
+    return "unknown"
+
 _initialized = False
 _client = None
 _options = {}
 _app = None
+
+
+def _run_full_scan(app, framework, cwd, client, debug=False):
+    """
+    Runs a full scan (backend endpoints + frontend routes) and reports
+    results to the platform. This used to run automatically on server
+    start / first request. Now it only runs when the BotVersion dashboard's
+    "Scan" button sends a request to this SDK's scan-trigger endpoint
+    (see interceptor.py). This fixes scans not happening on redeploys
+    (e.g. Vercel/serverless) since there's no "restart" event to hook into.
+    """
+    result = {
+        "endpoint_count": 0,
+        "route_count": 0,
+        "project_type": None,
+        "detected_backend": framework,
+        "detected_frontend": None,
+        "sdk_language": "python",
+    }
+
+    try:
+        endpoints = []
+        if app is not None:
+            endpoints = scan_routes(app, framework)
+        elif framework == "django":
+            endpoints = scan_routes(None, "django")
+
+        result["endpoint_count"] = len(endpoints)
+
+        if endpoints:
+            client.register_endpoints_now(endpoints)
+
+    except Exception:
+        if debug:
+            import traceback
+            traceback.print_exc()
+
+    result["detected_frontend"] = None
+    result["project_type"] = _classify_installation(framework)
+
+    return result
 
 
 def init(app=None, api_key=None, **options):
@@ -52,10 +104,16 @@ def init(app=None, api_key=None, **options):
         # Re-attach interceptor after hot reload
         framework = _detect_framework(app)
         if framework and _client:
+            _cwd = _options.get("cwd", os.getcwd())
+            _debug = _options.get("debug", False)
             interceptor_options = {
                 "exclude": _options.get("exclude", []),
                 "api_prefix": _options.get("api_prefix", None),
-                "debug": _options.get("debug", False),
+                "debug": _debug,
+                "scan_secret": _options.get("api_key"),
+                "on_scan_requested": lambda: _run_full_scan(
+                    app, framework, _cwd, _client, _debug
+                ),
             }
             if framework == "fastapi":
                 attach_fastapi_interceptor(app, _client, interceptor_options)
@@ -94,6 +152,8 @@ def init(app=None, api_key=None, **options):
 
     if not framework:
         _initialized = False
+        if debug:
+            print("[botversion] No supported framework detected. SDK not initialized.")
         return
 
     _client = BotVersionClient({
@@ -108,10 +168,16 @@ def init(app=None, api_key=None, **options):
     builtins._botversion_client = _client
     builtins._botversion_options = _options
 
+    cwd = options.get("cwd", os.getcwd())
+
     interceptor_options = {
         "exclude": options.get("exclude", []),
         "api_prefix": options.get("api_prefix", None),
         "debug": debug,
+        "scan_secret": api_key,
+        "on_scan_requested": lambda: _run_full_scan(
+            app, framework, cwd, _client, debug
+        ),
     }
 
     # ── Attach runtime interceptor ───────────────────────────────────────────
@@ -140,85 +206,6 @@ def init(app=None, api_key=None, **options):
         attach_cherrypy_interceptor(app, _client, interceptor_options)
     else:
         return
-
-    # ── Static scan (delayed 500ms — let app finish registering routes) ──────
-    def _run_scan():
-        try:
-            endpoints = []
-
-            if app is not None:
-                endpoints = scan_routes(app, framework)
-
-            elif framework == "django":
-                endpoints = scan_routes(None, "django")
-
-            # For any other framework with no app object, skip backend scan
-            # but still continue to frontend scan below
-
-            if endpoints:
-                _client.register_endpoints_now(endpoints)
-
-        except Exception as e:
-            if debug:
-                import traceback
-                traceback.print_exc()
-
-        cwd = options.get("cwd", os.getcwd())
-        route_patterns = scan_frontend_routes(cwd)
-        if route_patterns:
-            _client.register_route_patterns(route_patterns)
-
-    if framework == "flask":
-        with app.app_context():
-            t = threading.Thread(target=_run_scan, daemon=False)
-            t.start()
-            t.join(timeout=15)
-            app._botversion_scanned = True
-
-        @app.after_request
-        def _botversion_first_scan(response):
-            if not getattr(app, '_botversion_scanned', False):
-                app._botversion_scanned = True
-                t = threading.Thread(target=_run_scan, daemon=False)
-                t.start()
-                t.join(timeout=15)
-            return response
-
-    elif framework == "fastapi":
-        @app.on_event("startup")
-        async def _botversion_startup_scan():
-            if not getattr(app, '_botversion_scanned', False):
-                app._botversion_scanned = True
-                t = threading.Thread(target=_run_scan, daemon=False)
-                t.start()
-                t.join(timeout=15)
-
-        @app.middleware("http")
-        async def _botversion_first_scan(request, call_next):
-            if not getattr(app, '_botversion_scanned', False):
-                app._botversion_scanned = True
-                t = threading.Thread(target=_run_scan, daemon=False)
-                t.start()
-                t.join(timeout=15)
-            return await call_next(request)
-
-    elif framework == "django":
-        try:
-            from django.apps import apps
-            if apps.ready:
-                t = threading.Thread(target=_run_scan, daemon=False)
-                t.start()
-                t.join(timeout=15)
-        except Exception:
-            t = threading.Timer(3.0, _run_scan)
-            t.daemon = False
-            t.start()
-
-    elif framework in ("starlette", "sanic", "falcon", "bottle",
-                       "aiohttp", "tornado", "pyramid", "cherrypy"):
-        t = threading.Timer(3.0, _run_scan)
-        t.daemon = False
-        t.start()
 
 
 def get_endpoints():

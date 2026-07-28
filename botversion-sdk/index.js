@@ -161,6 +161,91 @@ function runBackendScanner(detectedBackend, app, options, cwd) {
   return endpoints;
 }
 
+var FULLSTACK_FRAMEWORKS = ["nextjs", "nuxt", "sveltekit", "remix"];
+var BACKEND_ONLY_FRAMEWORKS = [
+  "express",
+  "fastify",
+  "nestjs",
+  "koa",
+  "hapi",
+  "adonis",
+];
+
+function classifyInstallation(detectedBackend, detectedFrontend) {
+  if (FULLSTACK_FRAMEWORKS.indexOf(detectedBackend) !== -1) {
+    return "fullstack";
+  }
+  if (
+    BACKEND_ONLY_FRAMEWORKS.indexOf(detectedBackend) !== -1 &&
+    detectedFrontend === "unknown"
+  ) {
+    return "backend-only";
+  }
+  if (detectedBackend === "unknown" && detectedFrontend !== "unknown") {
+    return "frontend-only";
+  }
+  if (detectedBackend === "unknown" && detectedFrontend === "unknown") {
+    return "unknown";
+  }
+  return "mixed";
+}
+
+// ── Run a full scan (backend endpoints + frontend routes) and report ────────
+// This used to run automatically 3 seconds after server start. Now it only
+// runs when the BotVersion dashboard's "Scan" button sends a request to this
+// SDK's internal scan-trigger endpoint (see interceptor.js). This fixes scans
+// not happening on serverless redeploys (Vercel, etc.) since there's no
+// "restart" event to hook into there.
+function runFullScan(
+  detectedBackend,
+  detectedFrontend,
+  app,
+  options,
+  cwd,
+  client,
+) {
+  var projectType = classifyInstallation(detectedBackend, detectedFrontend);
+
+  var result = {
+    endpointCount: 0,
+    routeCount: 0,
+    projectType: projectType,
+    detectedBackend: detectedBackend,
+    detectedFrontend: detectedFrontend,
+    sdkLanguage: "javascript",
+  };
+
+  var shouldScanBackend =
+    projectType === "fullstack" ||
+    projectType === "backend-only" ||
+    projectType === "mixed";
+
+  var shouldScanFrontend =
+    projectType === "fullstack" || projectType === "frontend-only";
+
+  if (shouldScanBackend) {
+    var endpoints = runBackendScanner(detectedBackend, app, options, cwd);
+    result.endpointCount = endpoints.length;
+
+    if (endpoints.length > 0) {
+      client.registerEndpoints(endpoints);
+    }
+  }
+
+  if (shouldScanFrontend) {
+    var routePatterns = scanner.scanFrontendRoutes(cwd);
+    result.routeCount = routePatterns.length;
+
+    if (routePatterns.length > 0) {
+      client.registerRoutePatterns(routePatterns).catch(function () {
+        // silently ignore — non-critical
+      });
+    }
+  }
+
+  return result;
+}
+
 // ── Attach the right runtime interceptor ─────────────────────────────────────
 function attachRuntimeInterceptor(detectedBackend, app, client, options) {
   switch (detectedBackend) {
@@ -169,6 +254,8 @@ function attachRuntimeInterceptor(detectedBackend, app, client, options) {
         exclude: options.exclude || [],
         apiPrefix: options.apiPrefix || null,
         debug: options.debug || false,
+        scanSecret: options.scanSecret,
+        onScanRequested: options.onScanRequested,
       });
       break;
 
@@ -177,6 +264,8 @@ function attachRuntimeInterceptor(detectedBackend, app, client, options) {
         exclude: options.exclude || [],
         apiPrefix: options.apiPrefix || "/api",
         debug: options.debug || false,
+        scanSecret: options.scanSecret,
+        onScanRequested: options.onScanRequested,
       });
       break;
 
@@ -186,6 +275,8 @@ function attachRuntimeInterceptor(detectedBackend, app, client, options) {
           exclude: options.exclude || [],
           apiPrefix: options.apiPrefix || null,
           debug: options.debug || false,
+          scanSecret: options.scanSecret,
+          onScanRequested: options.onScanRequested,
         });
       }
       break;
@@ -196,6 +287,8 @@ function attachRuntimeInterceptor(detectedBackend, app, client, options) {
           exclude: options.exclude || [],
           apiPrefix: options.apiPrefix || null,
           debug: options.debug || false,
+          scanSecret: options.scanSecret,
+          onScanRequested: options.onScanRequested,
         });
       }
       break;
@@ -206,6 +299,8 @@ function attachRuntimeInterceptor(detectedBackend, app, client, options) {
           exclude: options.exclude || [],
           apiPrefix: options.apiPrefix || null,
           debug: options.debug || false,
+          scanSecret: options.scanSecret,
+          onScanRequested: options.onScanRequested,
         });
       }
       break;
@@ -215,6 +310,8 @@ function attachRuntimeInterceptor(detectedBackend, app, client, options) {
         exclude: options.exclude || [],
         apiPrefix: options.apiPrefix || "/",
         debug: options.debug || false,
+        scanSecret: options.scanSecret,
+        onScanRequested: options.onScanRequested,
       });
       break;
 
@@ -223,6 +320,8 @@ function attachRuntimeInterceptor(detectedBackend, app, client, options) {
         exclude: options.exclude || [],
         apiPrefix: options.apiPrefix || "/",
         debug: options.debug || false,
+        scanSecret: options.scanSecret,
+        onScanRequested: options.onScanRequested,
       });
       break;
 
@@ -231,6 +330,8 @@ function attachRuntimeInterceptor(detectedBackend, app, client, options) {
         exclude: options.exclude || [],
         apiPrefix: options.apiPrefix || "/api",
         debug: options.debug || false,
+        scanSecret: options.scanSecret,
+        onScanRequested: options.onScanRequested,
       });
       break;
 
@@ -239,6 +340,8 @@ function attachRuntimeInterceptor(detectedBackend, app, client, options) {
         exclude: options.exclude || [],
         apiPrefix: options.apiPrefix || "/",
         debug: options.debug || false,
+        scanSecret: options.scanSecret,
+        onScanRequested: options.onScanRequested,
       });
       break;
 
@@ -247,6 +350,8 @@ function attachRuntimeInterceptor(detectedBackend, app, client, options) {
         exclude: options.exclude || [],
         apiPrefix: options.apiPrefix || "/",
         debug: options.debug || false,
+        scanSecret: options.scanSecret,
+        onScanRequested: options.onScanRequested,
       });
       break;
 
@@ -256,6 +361,8 @@ function attachRuntimeInterceptor(detectedBackend, app, client, options) {
         exclude: options.exclude || [],
         apiPrefix: options.apiPrefix || "/",
         debug: options.debug || false,
+        scanSecret: options.scanSecret,
+        onScanRequested: options.onScanRequested,
       });
       break;
   }
@@ -289,7 +396,22 @@ var BotVersion = {
       this._initialized = true;
       const savedOptions = global._botVersionOptions || {};
       const savedFramework = global._botVersionFramework || "nextjs";
-      attachRuntimeInterceptor(savedFramework, app, this._client, savedOptions);
+      const savedFrontend = global._botVersionFrontendFramework || "unknown";
+      const savedProjectType = classifyInstallation(
+        savedFramework,
+        savedFrontend,
+      );
+      if (
+        savedProjectType !== "frontend-only" &&
+        savedProjectType !== "unknown"
+      ) {
+        attachRuntimeInterceptor(
+          savedFramework,
+          app,
+          this._client,
+          savedOptions,
+        );
+      }
       return;
     }
 
@@ -319,33 +441,36 @@ var BotVersion = {
     var detectedFrontend = options.frontendFramework || detected.frontend;
 
     global._botVersionFramework = detectedBackend;
+    global._botVersionFrontendFramework = detectedFrontend;
+
+    var projectType = classifyInstallation(detectedBackend, detectedFrontend);
 
     if (debug) {
-      // Detected: detectedBackend, detectedFrontend
+      // Detected: detectedBackend, detectedFrontend, projectType
     }
 
+    // ── Wire up the on-demand scan trigger ───────────────────────────────────
+    // Instead of scanning automatically on restart, the interceptor now
+    // listens for a special request from the BotVersion dashboard and runs
+    // the scan only when the user clicks "Scan" there.
+    options.scanSecret = options.apiKey;
+    options.onScanRequested = function () {
+      return runFullScan(
+        detectedBackend,
+        detectedFrontend,
+        app,
+        options,
+        cwd,
+        self._client,
+      );
+    };
+
     // ── Attach runtime interceptor ───────────────────────────────────────────
-    attachRuntimeInterceptor(detectedBackend, app, self._client, options);
-
-    // ── Static scan ──────────────────────────────────────────────────────────
-    setTimeout(function () {
-      // Run backend scanner
-      var endpoints = runBackendScanner(detectedBackend, app, options, cwd);
-
-      // Send endpoints to platform
-      if (endpoints.length > 0) {
-        self._client.registerEndpoints(endpoints);
-      }
-
-      // Run frontend route scanner
-      var routePatterns = scanner.scanFrontendRoutes(cwd);
-
-      if (routePatterns.length > 0) {
-        self._client.registerRoutePatterns(routePatterns).catch(function () {
-          // silently ignore — non-critical
-        });
-      }
-    }, 3000);
+    // Skip for frontend-only or unknown projects — there's no backend
+    // server on this process worth intercepting live traffic on.
+    if (projectType !== "frontend-only" && projectType !== "unknown") {
+      attachRuntimeInterceptor(detectedBackend, app, self._client, options);
+    }
   },
 
   getEndpoints: function () {
@@ -377,3 +502,5 @@ module.exports.default = BotVersion;
 module.exports.init = BotVersion.init;
 module.exports.getEndpoints = BotVersion.getEndpoints;
 module.exports.registerEndpoint = BotVersion.registerEndpoint;
+module.exports.detectFrameworks = detectFrameworks;
+module.exports.classifyInstallation = classifyInstallation;

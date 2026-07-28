@@ -99,14 +99,20 @@ BotVersionClient.prototype.updateEndpoint = function (endpoint) {
   });
 };
 
-BotVersionClient.prototype.registerRoutePatterns = function (patterns) {
+BotVersionClient.prototype.registerRoutePatterns = function (
+  patterns,
+  classification,
+) {
   var self = this;
-  if (!patterns || patterns.length === 0) return Promise.resolve();
-
-  return self._post("/api/sdk/register-route-patterns", {
+  var body = {
     workspaceKey: self.apiKey,
-    patterns: patterns,
-  });
+    patterns: patterns || [],
+    classification: classification || null,
+  };
+  if ((!patterns || patterns.length === 0) && !classification) {
+    return Promise.resolve();
+  }
+  return self._post("/api/sdk/register-route-patterns", body);
 };
 
 /**
