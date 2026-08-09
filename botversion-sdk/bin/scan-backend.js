@@ -3,9 +3,8 @@
 
 var path = require("path");
 var fs = require("fs");
-var scanner = require("../scanner");
-var BotVersionClient = require("../client");
 var sdk = require("../index");
+var BotVersionClient = require("../client");
 
 // Auto-load env files from the customer's project, same precedence Next.js
 // uses: .env first, then .env.local (which is allowed to override .env).
@@ -34,7 +33,7 @@ var platformUrl =
 
 if (!apiKey) {
   console.error(
-    "[BotVersion] BOTVERSION_API_KEY environment variable is not set. Skipping frontend route scan.",
+    "[BotVersion] BOTVERSION_API_KEY environment variable is not set. Skipping backend endpoint scan.",
   );
   process.exit(0);
 }
@@ -44,22 +43,32 @@ var client = new BotVersionClient({ apiKey: apiKey, platformUrl: platformUrl });
 
 var detected = sdk.detectFrameworks(cwd);
 var projectType = sdk.classifyInstallation(detected.backend, detected.frontend);
-var routePatterns = scanner.scanFrontendRoutes(cwd);
+
+var shouldScanBackend =
+  projectType === "fullstack" ||
+  projectType === "backend-only" ||
+  projectType === "mixed";
+
+if (!shouldScanBackend) {
+  process.exit(0);
+}
+
+// No live `app` instance exists at build time — pass null.
+// All scanner functions read directly from the filesystem via cwd.
+var endpoints = sdk.runBackendScanner(detected.backend, null, {}, cwd);
+
+if (endpoints.length === 0) {
+  process.exit(0);
+}
 
 client
-  .registerRoutePatterns(routePatterns, {
-    source: "cli",
-    projectType: projectType,
-    detectedBackend: detected.backend,
-    detectedFrontend: detected.frontend,
-    sdkLanguage: "javascript",
-  })
+  .registerEndpointsNow(endpoints)
   .then(function () {
     process.exit(0);
   })
   .catch(function (err) {
     console.error(
-      "[BotVersion] Failed to report frontend routes:",
+      "[BotVersion] Failed to report backend endpoints:",
       err.message,
     );
     process.exit(0);

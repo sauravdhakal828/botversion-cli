@@ -92,34 +92,43 @@ function attachInterceptor(app, client, options) {
     }
 
     const method = req.method.toUpperCase();
-    const normalizedPath = normalizePath(path);
-    const endpointKey = method + ":" + normalizedPath;
 
-    const bodyStructure = buildBodyStructure(req.body);
-    const bodyKey =
-      endpointKey +
-      ":" +
-      Object.keys(bodyStructure || {})
-        .sort()
-        .join(",");
+    // Split batched tRPC paths into separate clean paths + matching body
+    // slots, so each real procedure is registered as its own endpoint.
+    const rawPaths = splitBatchPath(path);
+    const bodySlots =
+      rawPaths.length > 1 ? splitBatchBody(req.body) : [req.body];
 
-    if (!reportedEndpoints.has(bodyKey)) {
-      reportedEndpoints.add(bodyKey);
+    rawPaths.forEach(function (singlePath, i) {
+      const normalizedPath = normalizePath(singlePath);
+      const endpointKey = method + ":" + normalizedPath;
+      const slotBody = bodySlots[i] || null;
 
-      const jsonSchema = structureToJsonSchema(bodyStructure);
+      const bodyStructure = buildBodyStructure(slotBody);
+      const bodyKey =
+        endpointKey +
+        ":" +
+        Object.keys(bodyStructure || {})
+          .sort()
+          .join(",");
 
-      // Report async — never block the request
-      setImmediate(function () {
-        client
-          .updateEndpoint({
-            method: method,
-            path: normalizedPath,
-            requestBody: jsonSchema,
-            detectedBy: "runtime",
-          })
-          .catch(function (err) {});
-      });
-    }
+      if (!reportedEndpoints.has(bodyKey)) {
+        reportedEndpoints.add(bodyKey);
+
+        const jsonSchema = structureToJsonSchema(bodyStructure);
+
+        setImmediate(function () {
+          client
+            .updateEndpoint({
+              method: method,
+              path: normalizedPath,
+              requestBody: jsonSchema,
+              detectedBy: "runtime",
+            })
+            .catch(function (err) {});
+        });
+      }
+    });
 
     next();
   });
@@ -182,6 +191,74 @@ function unwrapTrpcJsonEnvelope(obj) {
     return obj.json;
   }
   return obj;
+}
+
+/**
+ * tRPC batches multiple procedure calls into one URL, e.g.
+ *   /api/trpc/me.get,getUserTopBanners,bookingUnconfirmedCount
+ * The procedure names appear comma-separated, only in the LAST path segment.
+ * This splits that into separate, clean paths — one per real procedure —
+ * so each gets registered as its own endpoint instead of one garbled,
+ * comma-joined path. Non-batched paths are returned unchanged as a
+ * single-item array.
+ */
+function splitBatchPath(rawPath) {
+  // tRPC is always mounted at a fixed base containing "/trpc/" — e.g.
+  // "/api/trpc/". Everything after that marker is the comma-separated
+  // procedure list, and each comma-separated piece is ALREADY a complete
+  // procedure path in its own right (it may contain further "/" for
+  // nested routers, e.g. "me/get") — it must never have another
+  // procedure's prefix re-attached to it.
+  const trpcMarker = "/trpc/";
+  const markerIndex = rawPath.indexOf(trpcMarker);
+  if (markerIndex === -1) return [rawPath];
+
+  const base = rawPath.slice(0, markerIndex + trpcMarker.length);
+  const tail = rawPath.slice(markerIndex + trpcMarker.length);
+
+  if (!tail.includes(",")) return [rawPath];
+
+  return tail
+    .split(",")
+    .map(function (proc) {
+      return proc.trim();
+    })
+    .filter(Boolean)
+    .map(function (proc) {
+      return base + proc;
+    });
+}
+
+/**
+ * Splits a batched tRPC request body/input — { "0": {...}, "1": {...} } —
+ * into an array of individual bodies, in the same order as the batch keys,
+ * which lines up with the same order splitBatchPath() returns procedure
+ * names in. Each slot is unwrapped from its own { json: {...} } envelope.
+ * Returns a single-item array unchanged if the body isn't actually batched,
+ * so callers can always treat the result uniformly.
+ */
+function splitBatchBody(bodyObj) {
+  if (!bodyObj || typeof bodyObj !== "object") return [bodyObj || null];
+
+  const keys = Object.keys(bodyObj);
+  const isBatch =
+    keys.length > 0 &&
+    keys.every(function (k) {
+      return /^\d+$/.test(k);
+    });
+
+  if (!isBatch) return [bodyObj];
+
+  return keys
+    .sort(function (a, b) {
+      return Number(a) - Number(b);
+    })
+    .map(function (k) {
+      const entry = bodyObj[k];
+      return entry && typeof entry === "object"
+        ? unwrapTrpcJsonEnvelope(entry)
+        : entry || null;
+    });
 }
 
 /**
@@ -315,18 +392,36 @@ function attachNextJsInterceptor(client, options) {
           return; // handled directly — don't pass through to the app
         }
 
-        const shouldIgnore = (options.exclude || [])
-          .concat([
-            "/health",
-            "/favicon.ico",
-            "/_next",
-            "/static",
-            "/public",
-            "/admin",
-          ])
-          .some(function (p) {
-            return path.startsWith(p);
-          });
+        const DEV_ASSET_MARKERS = [
+          "/node_modules",
+          "/.svelte-kit",
+          "/@fs",
+          "/@vite",
+          "/@id",
+          "/debug-cors",
+          "/src/lib",
+          "/src/routes",
+        ];
+        const STATIC_ASSET_EXT =
+          /\.(svelte|vue|css|scss|map|woff2?|ttf|eot|ico|png|jpe?g|gif|svg|webp|mjs)(\?.*)?$/i;
+
+        const shouldIgnore =
+          (options.exclude || [])
+            .concat([
+              "/health",
+              "/favicon.ico",
+              "/_next",
+              "/static",
+              "/public",
+              "/admin",
+            ])
+            .some(function (p) {
+              return path.startsWith(p);
+            }) ||
+          DEV_ASSET_MARKERS.some(function (m) {
+            return path.includes(m);
+          }) ||
+          STATIC_ASSET_EXT.test(path);
 
         const isApiPath = path.startsWith(options.apiPrefix || "/api");
 
@@ -354,17 +449,21 @@ function attachNextJsInterceptor(client, options) {
             // Helper to send body structure to platform
             function reportBody(bodyObj) {
               try {
-                // ── tRPC GET input extraction ──────────────────────────────────────
-                // tRPC GET requests send their input as a URL-encoded JSON query
-                // parameter called "input". The body is always empty for GET requests.
-                // We only attempt this extraction when:
-                //   1. The body is empty (GET requests have no body)
-                //   2. The URL contains an "input" query parameter
-                //   3. The path looks like a tRPC endpoint (/trpc/)
-                // This prevents accidentally treating regular REST query params
-                // (e.g. ?filter=active&limit=10) as a body schema.
+                // Split the (possibly batched) tRPC path into separate,
+                // clean paths — one per real procedure — instead of one
+                // garbled comma-joined path.
+                const splitPaths = splitBatchPath(path).map(normalizePath);
+
                 const isTrpcPath = path.includes("/trpc/");
                 const hasInputParam = req.url && req.url.includes("input=");
+
+                // ── tRPC GET input extraction ──────────────────────────────────────
+                // tRPC GET requests send their input as a URL-encoded JSON query
+                // parameter called "input". We only attempt this extraction when
+                // the body is empty, the URL has an "input" param, and the path
+                // looks like a tRPC endpoint — so regular REST query params are
+                // never mistaken for a body schema.
+                let bodySlots = null;
 
                 if (
                   isTrpcPath &&
@@ -372,7 +471,6 @@ function attachNextJsInterceptor(client, options) {
                   (!bodyObj || Object.keys(bodyObj).length === 0)
                 ) {
                   try {
-                    // Use URL constructor to safely parse query params
                     const urlObj = new URL(req.url, "http://localhost");
                     const inputParam = urlObj.searchParams.get("input");
 
@@ -381,7 +479,6 @@ function attachNextJsInterceptor(client, options) {
                       try {
                         decoded = JSON.parse(decodeURIComponent(inputParam));
                       } catch (e) {
-                        // input param exists but is not valid JSON — skip
                         decoded = null;
                       }
 
@@ -390,44 +487,10 @@ function attachNextJsInterceptor(client, options) {
                         typeof decoded === "object" &&
                         !Array.isArray(decoded)
                       ) {
-                        const keys = Object.keys(decoded);
-
-                        // Format 1 — batched: { "0": { json: {...} }, "1": { json: {...} } }
-                        // All keys are numeric strings
-                        const isBatch =
-                          keys.length > 0 && keys.every((k) => /^\d+$/.test(k));
-
-                        if (isBatch) {
-                          // Merge all batch entries into one flat object
-                          // so we capture the full schema across all procedures
-                          const merged = {};
-                          keys.forEach((k) => {
-                            const entry = decoded[k];
-                            if (entry && typeof entry === "object") {
-                              // Unwrap { json: {...} } envelope if present
-                              const unwrapped =
-                                entry.json && typeof entry.json === "object"
-                                  ? entry.json
-                                  : entry;
-                              Object.assign(merged, unwrapped);
-                            }
-                          });
-                          if (Object.keys(merged).length > 0) {
-                            bodyObj = merged;
-                          }
-                        }
-                        // Format 2 — single with superjson: { json: {...}, meta: {...} }
-                        else if (
-                          decoded.json &&
-                          typeof decoded.json === "object"
-                        ) {
-                          bodyObj = decoded.json;
-                        }
-                        // Format 3 — already unwrapped: { group: {...}, limit: 10 }
-                        // Only use this if it doesn't look like a tRPC envelope
-                        else if (!decoded.meta && !decoded.json) {
-                          bodyObj = decoded;
-                        }
+                        // Splits batched input into one slot per procedure,
+                        // in path order — never merges different procedures'
+                        // fields together.
+                        bodySlots = splitBatchBody(decoded);
                       }
                     }
                   } catch (e) {
@@ -435,18 +498,29 @@ function attachNextJsInterceptor(client, options) {
                   }
                 }
 
-                // ── Normal body processing (unchanged) ────────────────────────────
-                const parsedBody = structureToJsonSchema(
-                  buildBodyStructure(bodyObj),
-                );
-                client
-                  .updateEndpoint({
-                    method: method,
-                    path: normalizedPath,
-                    requestBody: parsedBody,
-                    detectedBy: "runtime",
-                  })
-                  .catch(function () {});
+                // Normal (non-GET-input) body — split the same way if the
+                // path turned out to be a batch.
+                if (!bodySlots) {
+                  bodySlots =
+                    splitPaths.length > 1 ? splitBatchBody(bodyObj) : [bodyObj];
+                }
+
+                // Report each real procedure as its own endpoint, with only
+                // its own fields — never another procedure's fields mixed in.
+                splitPaths.forEach(function (singlePath, i) {
+                  const slotBody = bodySlots[i] || null;
+                  const parsedBody = structureToJsonSchema(
+                    buildBodyStructure(slotBody),
+                  );
+                  client
+                    .updateEndpoint({
+                      method: method,
+                      path: singlePath,
+                      requestBody: parsedBody,
+                      detectedBy: "runtime",
+                    })
+                    .catch(function () {});
+                });
               } catch (e) {}
             }
 

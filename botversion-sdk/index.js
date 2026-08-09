@@ -421,7 +421,7 @@ var BotVersion = {
 
     this._client = new BotVersionClient({
       apiKey: options.apiKey,
-      platformUrl: options.platformUrl || "https://botversion.com",
+      platformUrl: options.platformUrl || "https://console.botversion.com",
       debug: options.debug || false,
       timeout: options.timeout || 30000,
     });
@@ -504,3 +504,4 @@ module.exports.getEndpoints = BotVersion.getEndpoints;
 module.exports.registerEndpoint = BotVersion.registerEndpoint;
 module.exports.detectFrameworks = detectFrameworks;
 module.exports.classifyInstallation = classifyInstallation;
+module.exports.runBackendScanner = runBackendScanner;
