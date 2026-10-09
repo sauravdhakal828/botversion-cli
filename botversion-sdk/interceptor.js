@@ -3,6 +3,71 @@
 
 const reportedEndpoints = new Set();
 
+// ── Query-string capture (GET / DELETE) ──────────────────────────────────
+// Records only the NAMES of query keys, never their values.
+const seenQueryVariants = new Set();
+const queryVariantCounts = {};
+const MAX_QUERY_VARIANTS = 5; // different key sets remembered per endpoint
+const MAX_QUERY_KEYS = 20;
+const QUERY_NOISE_KEYS = new Set([
+  "t",
+  "ts",
+  "timestamp",
+  "cb",
+  "cachebust",
+  "nocache",
+]);
+
+function buildQueryStructure(method, rawUrl, rawPath) {
+  if (method !== "GET" && method !== "DELETE") return null;
+  if (String(rawPath || "").indexOf("/trpc/") !== -1) return null; // tRPC has its own input handling
+  const url = String(rawUrl || "");
+  const q = url.indexOf("?");
+  if (q === -1) return null;
+  let params;
+  try {
+    params = new URLSearchParams(url.slice(q + 1).split("#")[0]);
+  } catch (e) {
+    return null;
+  }
+  const structure = {};
+  let count = 0;
+  params.forEach(function (_value, rawKey) {
+    if (count >= MAX_QUERY_KEYS) return;
+    const key = rawKey.replace(/\[\]$/, "");
+    if (!/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(key)) return;
+    if (QUERY_NOISE_KEYS.has(key.toLowerCase()) || looksLikeIdKey(key)) return;
+    if (Object.prototype.hasOwnProperty.call(structure, key)) return;
+    structure[key] = "string";
+    count++;
+  });
+  return count > 0 ? structure : null;
+}
+
+// Returns the query key names for this call, or null (also once an endpoint has too many variants)
+function resolveQueryStructure(baseKey, method, rawUrl, rawPath) {
+  const structure = buildQueryStructure(method, rawUrl, rawPath);
+  if (!structure) return null;
+  const variant = baseKey + queryKeySuffix(structure);
+  if (seenQueryVariants.has(variant)) return structure;
+  const used = queryVariantCounts[baseKey] || 0;
+  if (used >= MAX_QUERY_VARIANTS) {
+    return null;
+  }
+  queryVariantCounts[baseKey] = used + 1;
+  seenQueryVariants.add(variant);
+  return structure;
+}
+
+function queryKeySuffix(structure) {
+  return structure ? ":q:" + Object.keys(structure).sort().join(",") : "";
+}
+
+function mergeQueryIntoStructure(bodyStructure, queryStructure) {
+  if (!queryStructure) return bodyStructure;
+  return Object.assign({}, queryStructure, bodyStructure || {});
+}
+
 function structureToJsonSchema(bodyStructure) {
   if (!bodyStructure) return null;
   return {
@@ -24,6 +89,339 @@ function structureToJsonSchema(bodyStructure) {
       }),
     ),
   };
+}
+
+// ── Response shape capture ───────────────────────────────────────────────
+// Records only field names and types of successful JSON replies (never values)
+// so the platform knows what each endpoint returns.
+const reportedResponses = new Set();
+// Stops watching an endpoint after a few replies that yielded no usable shape
+const responseAttempts = {};
+const MAX_RESPONSE_ATTEMPTS = 5;
+const MAX_RESPONSE_CAPTURE_BYTES = 256 * 1024; // stop buffering bigger replies
+const MAX_RESPONSE_DEPTH = 4;
+const MAX_RESPONSE_FIELDS = 50;
+
+// Keys that look like record IDs or emails are never sent as field names
+// (guards against objects keyed by IDs leaking them as "fields").
+function looksLikeIdKey(key) {
+  return (
+    /^\d+$/.test(key) ||
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      key,
+    ) ||
+    /^[0-9a-f]{24}$/i.test(key) ||
+    /^c[a-z0-9]{20,}$/i.test(key) ||
+    (key.length >= 16 && /[a-zA-Z]/.test(key) && /[0-9]/.test(key)) ||
+    key.includes("@")
+  );
+}
+
+function describeResponseValue(val, depth) {
+  if (val === null || val === undefined) return { type: "string" };
+  if (Array.isArray(val)) {
+    if (depth >= MAX_RESPONSE_DEPTH || val.length === 0) {
+      return { type: "array", items: { type: "object" } };
+    }
+    return {
+      type: "array",
+      items: describeArrayItems(val.slice(0, 5), depth + 1),
+    };
+  }
+  if (typeof val === "object") {
+    const keys = Object.keys(val);
+    if (depth >= MAX_RESPONSE_DEPTH || keys.some(looksLikeIdKey)) {
+      return { type: "object" };
+    }
+    const properties = {};
+    keys.slice(0, MAX_RESPONSE_FIELDS).forEach(function (k) {
+      properties[k] = describeResponseValue(val[k], depth + 1);
+    });
+    return { type: "object", properties: properties };
+  }
+  if (typeof val === "number" || typeof val === "boolean") {
+    return { type: typeof val };
+  }
+  return { type: "string" };
+}
+
+// Combines the first few list items so fields missing from one item still appear
+function describeArrayItems(items, depth) {
+  const objs = items.filter(function (i) {
+    return i && typeof i === "object" && !Array.isArray(i);
+  });
+  if (objs.length === 0) {
+    const first = items.find(function (i) {
+      return i !== null && i !== undefined;
+    });
+    return first === undefined
+      ? { type: "object" }
+      : describeResponseValue(first, depth);
+  }
+  const merged = {};
+  objs.forEach(function (o) {
+    Object.keys(o)
+      .slice(0, MAX_RESPONSE_FIELDS)
+      .forEach(function (k) {
+        if (merged[k] === undefined || merged[k] === null) merged[k] = o[k];
+      });
+  });
+  return describeResponseValue(merged, depth);
+}
+
+// A shape with no fields (empty list, {}) is not useful — keep waiting for a better reply
+function hasResponseFields(schema) {
+  if (!schema) return false;
+  if (schema.type === "array") return hasResponseFields(schema.items);
+  return !!(schema.properties && Object.keys(schema.properties).length > 0);
+}
+
+// tRPC wraps each result as { result: { data: { json: ... } } }; errors as { error }
+function unwrapTrpcResult(entry) {
+  if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+    if (entry.error && !entry.result) return undefined;
+    if (
+      entry.result &&
+      typeof entry.result === "object" &&
+      "data" in entry.result
+    ) {
+      const data = entry.result.data;
+      return data &&
+        typeof data === "object" &&
+        !Array.isArray(data) &&
+        "json" in data
+        ? data.json
+        : data;
+    }
+  }
+  return entry;
+}
+
+// Parses the captured reply; also handles replies compressed by the host app
+function parseCapturedBody(buffer, res) {
+  try {
+    return JSON.parse(buffer.toString("utf8"));
+  } catch (e) {}
+  try {
+    const zlib = require("zlib");
+    const enc = String(res.getHeader("content-encoding") || "").toLowerCase();
+    const opts = { maxOutputLength: 1024 * 1024 };
+    let raw = null;
+    if (enc.includes("gzip")) raw = zlib.gunzipSync(buffer, opts);
+    else if (enc.includes("br")) raw = zlib.brotliDecompressSync(buffer, opts);
+    else if (enc.includes("deflate")) raw = zlib.inflateSync(buffer, opts);
+    if (raw) return JSON.parse(raw.toString("utf8"));
+  } catch (e) {}
+  return undefined;
+}
+
+// Our own scan-trigger route must never be reported as one of the host's endpoints
+function isBotVersionInternalPath(path) {
+  return String(path || "").indexOf("/__botversion/") === 0;
+}
+
+// True while at least one endpoint behind this path still has no captured reply shape
+function isResponseShapeNeeded(method, rawPath) {
+  if (isBotVersionInternalPath(rawPath)) return false;
+  return splitBatchPath(rawPath)
+    .map(normalizePath)
+    .some(function (p) {
+      const k = method + ":" + p;
+      return (
+        !reportedResponses.has(k) &&
+        (responseAttempts[k] || 0) < MAX_RESPONSE_ATTEMPTS
+      );
+    });
+}
+
+// Turns an already-parsed reply into field-name shapes and reports each new one
+function reportResponseShape(client, method, rawPath, parsed) {
+  try {
+    if (!parsed || typeof parsed !== "object") return;
+
+    const isTrpc = rawPath.includes("/trpc/");
+    const paths = splitBatchPath(rawPath).map(normalizePath);
+
+    let slots;
+    if (paths.length > 1) {
+      if (!isTrpc || !Array.isArray(parsed) || parsed.length !== paths.length)
+        return;
+      slots = parsed.map(unwrapTrpcResult);
+    } else {
+      slots = [isTrpc ? unwrapTrpcResult(parsed) : parsed];
+    }
+
+    paths.forEach(function (p, i) {
+      const key = method + ":" + p;
+      if (reportedResponses.has(key)) return;
+      const slot = slots[i];
+      if (!slot || typeof slot !== "object") return;
+
+      const schema = describeResponseValue(slot, 0);
+      if (!hasResponseFields(schema)) return;
+
+      reportedResponses.add(key);
+      client
+        .updateEndpoint({
+          method: method,
+          path: p,
+          requestBody: null,
+          responseBody: schema,
+          detectedBy: "runtime",
+        })
+        .catch(function () {});
+    });
+  } catch (e) {}
+}
+
+// For frameworks that expose the reply body before sending it (Koa, Hapi)
+function reportFrameworkBody(
+  client,
+  method,
+  rawPath,
+  statusCode,
+  contentType,
+  body,
+) {
+  // Deferred so it is always sent after the endpoint's first registration
+  setImmediate(function () {
+    reportFrameworkBodyNow(
+      client,
+      method,
+      rawPath,
+      statusCode,
+      contentType,
+      body,
+    );
+  });
+}
+
+function reportFrameworkBodyNow(
+  client,
+  method,
+  rawPath,
+  statusCode,
+  contentType,
+  body,
+) {
+  try {
+    if (statusCode < 200 || statusCode >= 300) return;
+    if (!isResponseShapeNeeded(method, rawPath)) return;
+
+    let text;
+    if (typeof body === "string" || Buffer.isBuffer(body)) {
+      const ct = String(contentType || "").toLowerCase();
+      if (ct && !ct.includes("json")) return;
+      text = Buffer.isBuffer(body) ? body.toString("utf8") : body;
+    } else if (
+      body &&
+      typeof body === "object" &&
+      typeof body.pipe !== "function"
+    ) {
+      // Round-trip so we see exactly what is sent (handles toJSON, dates, class instances)
+      text = JSON.stringify(body);
+    } else {
+      return; // streams and empty replies cannot be read
+    }
+
+    if (!text || text.length > MAX_RESPONSE_CAPTURE_BYTES) return;
+    reportResponseShape(client, method, rawPath, JSON.parse(text));
+  } catch (e) {}
+}
+
+// Watches one Node reply (Express and the plain http server) and, if it is a
+// successful JSON reply, reports its shape. Never changes the reply and never
+// throws into the host app.
+function watchJsonResponse(res, client, method, rawPath, req) {
+  try {
+    if (
+      !res ||
+      typeof res.write !== "function" ||
+      typeof res.once !== "function"
+    )
+      return;
+    if (!isResponseShapeNeeded(method, rawPath)) return; // no overhead once captured
+
+    const chunks = [];
+    let size = 0;
+    let skip = false;
+
+    // Drops cache-validation headers so the app sends a full reply instead of an empty 304
+    // (which has no body to read). Only runs while this endpoint still has no captured shape.
+    try {
+      if (req && req.headers) {
+        delete req.headers["if-none-match"];
+        delete req.headers["if-modified-since"];
+      }
+    } catch (e) {}
+
+    function collect(chunk, encoding) {
+      if (
+        skip ||
+        chunk === undefined ||
+        chunk === null ||
+        typeof chunk === "function"
+      )
+        return;
+      try {
+        if (chunks.length === 0) {
+          const ct = String(res.getHeader("content-type") || "").toLowerCase();
+          if (ct && !ct.includes("json")) {
+            skip = true;
+            return;
+          }
+        }
+        const buf =
+          typeof chunk === "string"
+            ? Buffer.from(
+                chunk,
+                typeof encoding === "string" ? encoding : "utf8",
+              )
+            : Buffer.from(chunk);
+        size += buf.length;
+        if (size > MAX_RESPONSE_CAPTURE_BYTES) {
+          skip = true;
+          chunks.length = 0;
+          return;
+        }
+        chunks.push(buf);
+      } catch (e) {
+        skip = true;
+      }
+    }
+
+    const originalWrite = res.write;
+    const originalEnd = res.end;
+    res.write = function (chunk, encoding) {
+      collect(chunk, encoding);
+      return originalWrite.apply(this, arguments);
+    };
+    res.end = function (chunk, encoding) {
+      collect(chunk, encoding);
+      return originalEnd.apply(this, arguments);
+    };
+
+    res.once("finish", function () {
+      if (res.statusCode < 200 || res.statusCode >= 300) return;
+
+      // Counts each successful reply so endpoints with no usable shape are eventually dropped
+      splitBatchPath(rawPath)
+        .map(normalizePath)
+        .forEach(function (p) {
+          const k = method + ":" + p;
+          responseAttempts[k] = (responseAttempts[k] || 0) + 1;
+        });
+
+      if (skip || chunks.length === 0) return;
+
+      setImmediate(function () {
+        try {
+          const parsed = parseCapturedBody(Buffer.concat(chunks), res);
+          reportResponseShape(client, method, rawPath, parsed);
+        } catch (e) {}
+      });
+    });
+  } catch (e) {}
 }
 
 /**
@@ -104,7 +502,16 @@ function attachInterceptor(app, client, options) {
       const endpointKey = method + ":" + normalizedPath;
       const slotBody = bodySlots[i] || null;
 
-      const bodyStructure = buildBodyStructure(slotBody);
+      // GET/DELETE inputs live in the query string, so their names are added too
+      const bodyStructure = mergeQueryIntoStructure(
+        buildBodyStructure(slotBody),
+        resolveQueryStructure(
+          endpointKey,
+          method,
+          req.originalUrl || req.url || "",
+          singlePath,
+        ),
+      );
       const bodyKey =
         endpointKey +
         ":" +
@@ -129,6 +536,9 @@ function attachInterceptor(app, client, options) {
         });
       }
     });
+
+    // Capture the shape of the successful JSON reply (field names only)
+    watchJsonResponse(res, client, method, path, req);
 
     next();
   });
@@ -426,8 +836,18 @@ function attachNextJsInterceptor(client, options) {
         const isApiPath = path.startsWith(options.apiPrefix || "/api");
 
         if (!shouldIgnore && isApiPath) {
+          // Capture the shape of the successful JSON reply (field names only)
+          watchJsonResponse(res, client, method, path, req);
           const normalizedPath = normalizePath(path);
-          const endpointKey = method + ":" + normalizedPath;
+          const baseKey = method + ":" + normalizedPath;
+          // GET/DELETE inputs live in the query string, so their names are tracked too
+          const queryStructure = resolveQueryStructure(
+            baseKey,
+            method,
+            req.url || "",
+            path,
+          );
+          const endpointKey = baseKey + queryKeySuffix(queryStructure);
 
           if (!reportedEndpoints.has(endpointKey)) {
             reportedEndpoints.add(endpointKey);
@@ -510,7 +930,10 @@ function attachNextJsInterceptor(client, options) {
                 splitPaths.forEach(function (singlePath, i) {
                   const slotBody = bodySlots[i] || null;
                   const parsedBody = structureToJsonSchema(
-                    buildBodyStructure(slotBody),
+                    mergeQueryIntoStructure(
+                      buildBodyStructure(slotBody),
+                      splitPaths.length === 1 ? queryStructure : null,
+                    ),
                   );
                   client
                     .updateEndpoint({
@@ -637,7 +1060,15 @@ function attachFastifyInterceptor(fastify, client, options) {
     if (options.apiPrefix && !path.startsWith(options.apiPrefix)) return;
 
     const normalizedPath = normalizePath(path);
-    const endpointKey = method + ":" + normalizedPath;
+    const baseKey = method + ":" + normalizedPath;
+    // GET/DELETE inputs live in the query string, so their names are reported too
+    const queryStructure = resolveQueryStructure(
+      baseKey,
+      method,
+      request.url || "",
+      path,
+    );
+    const endpointKey = baseKey + queryKeySuffix(queryStructure);
 
     if (!reportedEndpoints.has(endpointKey)) {
       reportedEndpoints.add(endpointKey);
@@ -647,7 +1078,9 @@ function attachFastifyInterceptor(fastify, client, options) {
           .updateEndpoint({
             method,
             path: normalizedPath,
-            requestBody: null,
+            requestBody: queryStructure
+              ? structureToJsonSchema(queryStructure)
+              : null,
             detectedBy: "runtime-fastify",
           })
           .catch(function () {});
@@ -683,6 +1116,45 @@ function attachFastifyInterceptor(fastify, client, options) {
         })
         .catch(function () {});
     });
+  });
+
+  // Capture the shape of the successful JSON reply (field names only)
+  fastify.addHook("onSend", async function (request, reply, payload) {
+    try {
+      const path = request.url ? request.url.split("?")[0] : "";
+      const method = request.method ? request.method.toUpperCase() : "";
+
+      const shouldIgnore = ignorePaths.some(function (p) {
+        return path.startsWith(p);
+      });
+      if (shouldIgnore) return payload;
+      if (options.apiPrefix && !path.startsWith(options.apiPrefix))
+        return payload;
+      if (reply.statusCode < 200 || reply.statusCode >= 300) return payload;
+      if (!isResponseShapeNeeded(method, path)) return payload;
+
+      const contentType = String(
+        reply.getHeader("content-type") || "",
+      ).toLowerCase();
+      if (contentType && !contentType.includes("json")) return payload;
+
+      // Only fully-built replies can be read; streams are skipped
+      if (typeof payload !== "string" && !Buffer.isBuffer(payload))
+        return payload;
+      const buffer = Buffer.from(payload);
+      if (buffer.length > MAX_RESPONSE_CAPTURE_BYTES) return payload;
+
+      const encoding = reply.getHeader("content-encoding");
+      setImmediate(function () {
+        const parsed = parseCapturedBody(buffer, {
+          getHeader: function () {
+            return encoding;
+          },
+        });
+        reportResponseShape(client, method, path, parsed);
+      });
+    } catch (e) {}
+    return payload;
   });
 }
 
@@ -748,7 +1220,16 @@ function attachKoaInterceptor(app, client, options) {
     const endpointKey = method + ":" + normalizedPath;
 
     const body = ctx.request.body;
-    const bodyStructure = buildBodyStructure(body);
+    // GET/DELETE inputs live in the query string, so their names are added too
+    const bodyStructure = mergeQueryIntoStructure(
+      buildBodyStructure(body),
+      resolveQueryStructure(
+        endpointKey,
+        method,
+        ctx.originalUrl || ctx.url || "",
+        path,
+      ),
+    );
     const bodyKey =
       endpointKey +
       ":" +
@@ -772,6 +1253,10 @@ function attachKoaInterceptor(app, client, options) {
           .catch(function () {});
       });
     }
+
+    // Capture the shape of the successful JSON reply (field names only).
+    // Kept last so it is queued after the endpoint's first registration above.
+    reportFrameworkBody(client, method, path, ctx.status, ctx.type, ctx.body);
   });
 }
 
@@ -840,7 +1325,16 @@ function attachHapiInterceptor(server, client, options) {
     const endpointKey = method + ":" + normalizedPath;
 
     const body = request.payload;
-    const bodyStructure = buildBodyStructure(body);
+    // GET/DELETE inputs live in the query string, so their names are added too
+    const bodyStructure = mergeQueryIntoStructure(
+      buildBodyStructure(body),
+      resolveQueryStructure(
+        endpointKey,
+        method,
+        path + ((request.url && request.url.search) || ""),
+        path,
+      ),
+    );
     const bodyKey =
       endpointKey +
       ":" +
@@ -865,6 +1359,40 @@ function attachHapiInterceptor(server, client, options) {
       });
     }
 
+    return h.continue;
+  });
+
+  // Capture the shape of the successful JSON reply (field names only)
+  server.ext("onPreResponse", function (request, h) {
+    try {
+      const path = request.path || "";
+      const method = request.method ? request.method.toUpperCase() : "";
+      const response = request.response;
+
+      const shouldIgnore = ignorePaths.some(function (p) {
+        return path.startsWith(p);
+      });
+      const outsidePrefix =
+        options.apiPrefix && !path.startsWith(options.apiPrefix);
+
+      // Only plain replies (not errors, views or streams) carry a readable body
+      if (
+        !shouldIgnore &&
+        !outsidePrefix &&
+        response &&
+        !response.isBoom &&
+        response.variety === "plain"
+      ) {
+        reportFrameworkBody(
+          client,
+          method,
+          path,
+          response.statusCode,
+          response.headers && response.headers["content-type"],
+          response.source,
+        );
+      }
+    } catch (e) {}
     return h.continue;
   });
 }

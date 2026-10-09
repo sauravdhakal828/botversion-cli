@@ -1,0 +1,14 @@
+pyproject.toml
+setup.py
+botversion_sdk/__init__.py
+botversion_sdk/client.py
+botversion_sdk/interceptor.py
+botversion_sdk/scanner.py
+botversion_sdk.egg-info/PKG-INFO
+botversion_sdk.egg-info/SOURCES.txt
+botversion_sdk.egg-info/dependency_links.txt
+botversion_sdk.egg-info/entry_points.txt
+botversion_sdk.egg-info/requires.txt
+botversion_sdk.egg-info/top_level.txt
+botversion_sdk/bin/__init__.py
+botversion_sdk/bin/scan_endpoints.py

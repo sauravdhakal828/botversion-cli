@@ -29,10 +29,6 @@ function scanExpressRoutes(app, cwd) {
     }
   }
 
-  endpoints.forEach((ep) => {
-    const status = ep.requestBody ? "✅" : "❌ NULL";
-  });
-
   return endpoints;
 }
 
@@ -70,14 +66,27 @@ function scanExpressFileStatically(filePath, seen) {
     const needsBody = ["POST", "PUT", "PATCH"].includes(effectiveMethod);
     const bodyFields = needsBody ? extractBodyFieldsFromFile(content) : null;
 
+    // GET inputs come from the query string; read them from this route's own code
+    const queryFields =
+      effectiveMethod === "GET"
+        ? extractQueryFieldsFromFile(
+            sliceRouteSegment(content, match.index, routePattern.source),
+          )
+        : null;
+
     const routeParamMap = buildRouteParamMap(routePath, []);
 
     endpoints.push({
       method: effectiveMethod,
       path: routePath,
       description: "",
-      requestBody: bodyFields,
+      requestBody: bodyFields || queryFields,
       routeParamMap: routeParamMap,
+      responseBody: extractResponseFieldsForRoute(
+        content,
+        match.index,
+        routePattern.source,
+      ),
       detectedBy: "static-scan-file",
     });
   }
@@ -136,6 +145,11 @@ function extractRoutes(stack, prefix, endpoints, seen, bodyMap) {
           }
         }
 
+        // GET inputs come from the query string, so read them from the handler code
+        if (method === "GET") {
+          requestBody = extractQueryFieldsFromHandlers(layer.route.stack);
+        }
+
         const routeParamMap = buildRouteParamMap(routePath, []);
 
         endpoints.push({
@@ -143,6 +157,10 @@ function extractRoutes(stack, prefix, endpoints, seen, bodyMap) {
           path: routePath,
           description: "",
           requestBody: requestBody,
+          responseBody: extractResponseFieldsFromHandlers(
+            layer.route.stack,
+            method,
+          ),
           routeParamMap: routeParamMap,
           detectedBy: "static-scan",
         });
@@ -191,24 +209,52 @@ function scanNextJsRoutes(pagesDir) {
 
       if (!/\.(js|ts)$/.test(file)) return;
       if (file.startsWith("_")) return;
+      // test files and type-declaration files are never endpoints
+      if (/\.(test|spec|d)\.(js|ts)$/.test(file)) return;
 
       const routeName = file.replace(/\.(js|ts)$/, "");
       const routePath =
         routeName === "index" ? prefix : prefix + "/" + routeName;
       const normalizedPath = routePath.replace(/\[([^\]]+)\]/g, ":$1");
 
-      const methods = detectMethodsFromFile(fullPath);
       const fileContent = fs.readFileSync(fullPath, "utf8");
+      // adapter files (tRPC): the real endpoints are the procedures behind them, learned from live traffic
+      if (/\bcreateNextApiHandler\b|@trpc\/server\/adapters/.test(fileContent))
+        return;
+      const methods = detectMethodsFromFile(fullPath);
 
       methods.forEach(function (method) {
+        // In files that handle several methods, read only this method's own code
+        // (the whole file is used when the methods cannot be told apart)
+        const methodCode =
+          getMethodSegment(fileContent, method, methods, "pages") ||
+          fileContent;
+        // Body methods fall back to the whole file if their own code has no fields
         const bodyFields =
-          method !== "GET" ? extractBodyFieldsFromFile(fileContent) : null;
-        const queryFields = extractQueryFieldsFromFile(fileContent);
+          method === "GET"
+            ? null
+            : extractBodyFieldsFromFile(methodCode) ||
+              (method !== "DELETE"
+                ? extractBodyFieldsFromFile(fileContent)
+                : null);
+        const queryFields = extractQueryFieldsFromFile(methodCode);
+
+        // GET inputs come from the query string; only this method's own code is read
+        const getQueryFields =
+          method === "GET"
+            ? removePathParamFields(
+                extractQueryFieldsFromFile(
+                  getMethodSegment(fileContent, "GET", methods, "pages") || "",
+                ),
+                normalizedPath,
+              )
+            : null;
 
         // For DELETE with no body fields, query params are the input
         const effectiveRequestBody =
           bodyFields ||
-          (method === "DELETE" && queryFields ? queryFields : null);
+          (method === "DELETE" && queryFields ? queryFields : null) ||
+          getQueryFields;
 
         const routeParamMap = buildRouteParamMap(normalizedPath, []);
 
@@ -217,6 +263,12 @@ function scanNextJsRoutes(pagesDir) {
           path: normalizedPath,
           description: "",
           requestBody: effectiveRequestBody,
+          responseBody: extractResponseFieldsForMethod(
+            fileContent,
+            method,
+            methods,
+            "pages",
+          ),
           routeParamMap: routeParamMap,
           detectedBy: "static-scan",
         });
@@ -231,49 +283,60 @@ function scanNextJsRoutes(pagesDir) {
 /**
  * Reads a file and detects which HTTP methods it handles
  */
+// Matches any variable that holds the request method (req.method, method, httpMethod, ...)
+const METHOD_REF =
+  "[\\w$.?]*[mM]ethod[\\w$]*(?:\\s*\\.\\s*toUpperCase\\s*\\(\\s*\\))?";
+const HTTP_METHOD_NAMES = ["GET", "POST", "PUT", "DELETE", "PATCH"];
+
+// Reads which HTTP methods a pages-style route file handles, whatever the variable is called
 function detectMethodsFromFile(filePath) {
   try {
     const fs = require("fs");
     const content = fs.readFileSync(filePath, "utf8");
-    const methods = [];
+    const detected = new Set();
 
-    const methodPatterns = [
-      { pattern: /req\.method\s*!==?\s*['"]GET['"]/i, method: "GET" },
-      { pattern: /req\.method\s*!==?\s*['"]POST['"]/i, method: "POST" },
-      { pattern: /req\.method\s*!==?\s*['"]PUT['"]/i, method: "PUT" },
-      { pattern: /req\.method\s*!==?\s*['"]DELETE['"]/i, method: "DELETE" },
-      { pattern: /req\.method\s*!==?\s*['"]PATCH['"]/i, method: "PATCH" },
-      { pattern: /req\.method\s*===?\s*['"]GET['"]/i, method: "GET" },
-      { pattern: /req\.method\s*===?\s*['"]POST['"]/i, method: "POST" },
-      { pattern: /req\.method\s*===?\s*['"]PUT['"]/i, method: "PUT" },
-      { pattern: /req\.method\s*===?\s*['"]DELETE['"]/i, method: "DELETE" },
-      { pattern: /req\.method\s*===?\s*['"]PATCH['"]/i, method: "PATCH" },
-      { pattern: /case\s*['"]GET['"]/i, method: "GET" },
-      { pattern: /case\s*['"]POST['"]/i, method: "POST" },
-      { pattern: /case\s*['"]PUT['"]/i, method: "PUT" },
-      { pattern: /case\s*['"]DELETE['"]/i, method: "DELETE" },
-      { pattern: /case\s*['"]PATCH['"]/i, method: "PATCH" },
-    ];
-
-    const detectedMethods = new Set();
-
-    methodPatterns.forEach(function (mp) {
-      if (mp.pattern.test(content)) {
-        detectedMethods.add(mp.method);
+    HTTP_METHOD_NAMES.forEach(function (m) {
+      const patterns = [
+        // method === "X"  /  method !== "X"
+        new RegExp(
+          METHOD_REF + "\\s*(?:===?|!==?)\\s*['\"`]" + m + "['\"`]",
+          "i",
+        ),
+        // "X" === method
+        new RegExp(
+          "['\"`]" + m + "['\"`]\\s*(?:===?|!==?)\\s*" + METHOD_REF,
+          "i",
+        ),
+        // switch (...) { case "X": }
+        new RegExp("case\\s*['\"`]" + m + "['\"`]", "i"),
+      ];
+      if (
+        patterns.some(function (p) {
+          return p.test(content);
+        })
+      ) {
+        detected.add(m);
       }
     });
 
-    // For "!== POST" pattern, the file ONLY handles POST — not all methods
-    // So if we detected via !== check, use just that method
-    if (detectedMethods.size > 0) {
-      detectedMethods.forEach(function (m) {
-        methods.push(m);
+    // ["GET", "POST"].includes(method)
+    const includesRe = new RegExp(
+      "\\[([^\\]]*)\\]\\s*\\.includes\\s*\\(\\s*" + METHOD_REF,
+      "gi",
+    );
+    for (const found of content.matchAll(includesRe)) {
+      HTTP_METHOD_NAMES.forEach(function (m) {
+        if (new RegExp("['\"`]" + m + "['\"`]", "i").test(found[1])) {
+          detected.add(m);
+        }
       });
-    } else {
-      methods.push("GET");
     }
 
-    return methods;
+    // no recognizable method check means the file is treated as GET-only
+    if (detected.size === 0) {
+      return ["GET"];
+    }
+    return Array.from(detected);
   } catch (e) {
     return ["GET", "POST"];
   }
@@ -431,9 +494,19 @@ function scanNextJsAppRoutes(appDir) {
       const methods = detectAppRouterMethods(content);
 
       methods.forEach(function (method) {
+        // In files that handle several methods, read only this method's own code
+        // (the whole file is used when the methods cannot be told apart)
+        const methodCode =
+          getMethodSegment(content, method, methods, "app") || content;
+        // Body methods fall back to the whole file if their own code has no fields
         const bodyFields =
-          method !== "GET" ? extractAppRouterBodyFields(content) : null;
-        const queryFields = extractQueryFieldsFromFile(content);
+          method === "GET"
+            ? null
+            : extractAppRouterBodyFields(methodCode) ||
+              (method !== "DELETE"
+                ? extractAppRouterBodyFields(content)
+                : null);
+        const queryFields = extractQueryFieldsFromFile(methodCode);
 
         const routeParamMap = buildRouteParamMap(routePath, []);
 
@@ -443,7 +516,21 @@ function scanNextJsAppRoutes(appDir) {
           description: "",
           requestBody:
             bodyFields ||
-            (method === "DELETE" && queryFields ? queryFields : null),
+            (method === "DELETE" && queryFields ? queryFields : null) ||
+            (method === "GET"
+              ? removePathParamFields(
+                  extractQueryFieldsFromFile(
+                    getMethodSegment(content, "GET", methods, "app") || "",
+                  ),
+                  routePath,
+                )
+              : null),
+          responseBody: extractResponseFieldsForMethod(
+            content,
+            method,
+            methods,
+            "app",
+          ),
           routeParamMap: routeParamMap,
           detectedBy: "static-scan",
         });
@@ -455,26 +542,21 @@ function scanNextJsAppRoutes(appDir) {
   return endpoints;
 }
 
+// Reads every common way a route file exports its HTTP handlers (function, const, re-export, destructured)
 function detectAppRouterMethods(content) {
-  const methods = [];
-  const patterns = [
-    { pattern: /export\s+async\s+function\s+GET\b/, method: "GET" },
-    { pattern: /export\s+async\s+function\s+POST\b/, method: "POST" },
-    { pattern: /export\s+async\s+function\s+PUT\b/, method: "PUT" },
-    { pattern: /export\s+async\s+function\s+DELETE\b/, method: "DELETE" },
-    { pattern: /export\s+async\s+function\s+PATCH\b/, method: "PATCH" },
-    // named exports too: export { POST }
-    { pattern: /export\s+function\s+GET\b/, method: "GET" },
-    { pattern: /export\s+function\s+POST\b/, method: "POST" },
-    { pattern: /export\s+function\s+PUT\b/, method: "PUT" },
-    { pattern: /export\s+function\s+DELETE\b/, method: "DELETE" },
-    { pattern: /export\s+function\s+PATCH\b/, method: "PATCH" },
-  ];
-
-  patterns.forEach(function (p) {
-    if (p.pattern.test(content)) methods.push(p.method);
+  const HTTP_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH"];
+  const methods = HTTP_METHODS.filter(function (m) {
+    return [
+      new RegExp("export\\s+(?:async\\s+)?function\\s+" + m + "\\b"),
+      new RegExp("export\\s+(?:const|let|var)\\s+" + m + "\\b"),
+      new RegExp("export\\s*\\{[^}]*\\b" + m + "\\b[^}]*\\}"),
+      new RegExp(
+        "export\\s+(?:const|let|var)\\s*\\{[^}]*\\b" + m + "\\b[^}]*\\}",
+      ),
+    ].some(function (re) {
+      return re.test(content);
+    });
   });
-
   return methods.length > 0 ? methods : ["GET"];
 }
 
@@ -573,23 +655,33 @@ function buildRouteParamMap(routePath, segments) {
 
 function extractQueryFieldsFromFile(content) {
   const fields = new Set();
+  const NAME = /^[A-Za-z_$][\w$.-]*$/;
+  const addField = function (raw) {
+    const name = String(raw).trim().split(":")[0].split("=")[0].trim();
+    if (name && NAME.test(name)) fields.add(name);
+  };
 
-  // Pattern 1: const { id } = req.query
-  const destructureMatches = content.matchAll(
-    /const\s*\{([^}]+)\}\s*=\s*req\.query/g,
-  );
-  for (const destructureMatch of destructureMatches) {
-    destructureMatch[1].split(",").forEach(function (f) {
-      const clean = f.trim().split(":")[0].trim();
-      if (clean) fields.add(clean);
-    });
+  // const { id, page = 1 } = req.query
+  const destructureRe =
+    /(?:const|let|var)\s*\{([^}]+)\}\s*=\s*(?:await\s+)?(?:req|request|ctx(?:\.request)?)\.query\b/g;
+  for (const m of String(content).matchAll(destructureRe)) {
+    m[1].split(",").forEach(addField);
   }
 
-  // Pattern 2: req.query.id
-  const dotMatches = content.matchAll(/req\.query\.([a-zA-Z_][a-zA-Z0-9_]*)/g);
-  for (const match of dotMatches) {
-    fields.add(match[1]);
-  }
+  // req.query.id / req.query?.id
+  const dotRe =
+    /(?:req|request|ctx(?:\.request)?)\.query(?:\?\.|\.)([A-Za-z_$][\w$]*)/g;
+  for (const m of String(content).matchAll(dotRe)) addField(m[1]);
+
+  // req.query["id"]
+  const bracketRe =
+    /(?:req|request|ctx(?:\.request)?)\.query\s*\??\.?\[\s*['"`]([^'"`]+)['"`]\s*\]/g;
+  for (const m of String(content).matchAll(bracketRe)) addField(m[1]);
+
+  // url.searchParams.get("id") / nextUrl.searchParams.get("id")
+  const searchParamsRe =
+    /searchParams\s*\??\.\s*(?:get|getAll|has)\s*\(\s*['"`]([^'"`]+)['"`]/g;
+  for (const m of String(content).matchAll(searchParamsRe)) addField(m[1]);
 
   if (fields.size === 0) return null;
 
@@ -599,6 +691,83 @@ function extractQueryFieldsFromFile(content) {
   });
 
   return { type: "object", properties };
+}
+
+// Drops fields that are really path params (Next.js Pages puts [id] into req.query too)
+function removePathParamFields(schema, routePath) {
+  if (!schema || !schema.properties) return null;
+  const pathParams = new Set(extractPathParams(routePath));
+  const properties = {};
+  Object.keys(schema.properties).forEach(function (k) {
+    if (!pathParams.has(k)) properties[k] = schema.properties[k];
+  });
+  return Object.keys(properties).length > 0
+    ? { type: "object", properties }
+    : null;
+}
+
+// Returns only the code belonging to one HTTP method in a multi-method file.
+// Returns null when it cannot be told apart, so no guess is made.
+function getMethodSegment(content, method, allMethods, style) {
+  if (!allMethods || allMethods.length < 2) return content;
+  const markers = [];
+  allMethods.forEach(function (m) {
+    const index = findStaticMethodMarkerIndex(content, style, m);
+    if (index !== -1) markers.push({ method: m, index: index });
+  });
+  const own = markers.find(function (x) {
+    return x.method === method;
+  });
+  if (!own) return null;
+  if (style === "app") {
+    const handlerCode = findStaticHandlerCode(content, own.index);
+    if (handlerCode) return handlerCode;
+  }
+  markers.sort(function (a, b) {
+    return a.index - b.index;
+  });
+  const pos = markers.indexOf(own);
+  const end =
+    pos + 1 < markers.length ? markers[pos + 1].index : content.length;
+  return content.slice(own.index, end);
+}
+
+// The code from one route definition (app.get(...), router.get(...)) up to the next one
+function sliceRouteSegment(content, startIndex, routePatternSource) {
+  try {
+    const re = new RegExp(routePatternSource, "gi");
+    let end = content.length;
+    let hit;
+    while ((hit = re.exec(content)) !== null) {
+      if (hit.index > startIndex) {
+        end = hit.index;
+        break;
+      }
+    }
+    return content.slice(startIndex, end);
+  } catch (e) {
+    return "";
+  }
+}
+
+// For live Express routes: reads query fields from every handler's source code
+function extractQueryFieldsFromHandlers(stack) {
+  try {
+    const merged = {};
+    for (const layer of stack) {
+      const fn = layer.handle || layer;
+      if (typeof fn !== "function") continue;
+      const fields = extractQueryFieldsFromFile(
+        Function.prototype.toString.call(fn),
+      );
+      if (fields) Object.assign(merged, fields.properties);
+    }
+    return Object.keys(merged).length > 0
+      ? { type: "object", properties: merged }
+      : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 /**
@@ -2190,6 +2359,347 @@ function scanRemixServerRoutes(cwd) {
   }
 
   return endpoints;
+}
+
+// ─── Static response-shape guessing ───────────────────────────────────────────
+// Best-effort: reads field names from reply objects written out directly in the code
+// (e.g. res.json({ id, name })). Replies built from variables are left empty on purpose;
+// real runtime replies fill those in later and replace any guess made here.
+const MAX_STATIC_RESPONSE_FIELDS = 50;
+const MAX_STATIC_LITERAL_LENGTH = 6000;
+
+const STATIC_REPLY_PATTERN =
+  /\b(?:res|resp|response|reply|NextResponse|Response)\s*(?:\.\s*(?:status|code)\s*\(\s*(\d{3})\s*\))?\s*\.\s*(?:json|send)\s*\(\s*\{|\bctx\.body\s*=\s*\{|\bh\.response\s*\(\s*\{/g;
+
+// Returns the index of the closing quote of the string starting at "start" (-1 if not found)
+function skipStaticString(text, start, limit) {
+  const quote = text[start];
+  for (let i = start + 1; i < limit; i++) {
+    const ch = text[i];
+    if (ch === "\\") {
+      i++;
+      continue;
+    }
+    if (ch === quote) return i;
+    if (quote === "`" && ch === "$" && text[i + 1] === "{") {
+      let depth = 1;
+      i += 2;
+      for (; i < limit && depth > 0; i++) {
+        const c = text[i];
+        if (c === '"' || c === "'" || c === "`") {
+          i = skipStaticString(text, i, limit);
+          if (i === -1) return -1;
+          continue;
+        }
+        if (c === "{") depth++;
+        else if (c === "}") depth--;
+      }
+      i--;
+      continue;
+    }
+    if (quote !== "`" && ch === "\n") return -1;
+  }
+  return -1;
+}
+
+// Returns the index of the "}" that closes the "{" at openIndex (null if it cannot be matched safely)
+function findStaticClosingBrace(text, openIndex) {
+  let depth = 0;
+  const limit = Math.min(text.length, openIndex + MAX_STATIC_LITERAL_LENGTH);
+  for (let i = openIndex; i < limit; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (ch === "/" && next === "/") {
+      const nl = text.indexOf("\n", i);
+      if (nl === -1) return null;
+      i = nl;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      const end = text.indexOf("*/", i + 2);
+      if (end === -1) return null;
+      i = end + 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      i = skipStaticString(text, i, limit);
+      if (i === -1) return null;
+      continue;
+    }
+    if (ch === "{" || ch === "[" || ch === "(") depth++;
+    else if (ch === "}" || ch === "]" || ch === ")") {
+      depth--;
+      if (depth === 0) return ch === "}" ? i : null;
+      if (depth < 0) return null;
+    }
+  }
+  return null;
+}
+
+// Splits the inside of an object literal on top-level commas (comments removed)
+function splitStaticEntries(inner) {
+  const entries = [];
+  let current = "";
+  let depth = 0;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    const next = inner[i + 1];
+    if (ch === "/" && next === "/") {
+      const nl = inner.indexOf("\n", i);
+      if (nl === -1) break;
+      i = nl;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      const end = inner.indexOf("*/", i + 2);
+      if (end === -1) break;
+      i = end + 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const end = skipStaticString(inner, i, inner.length);
+      if (end === -1) return null;
+      current += inner.slice(i, end + 1);
+      i = end;
+      continue;
+    }
+    if (ch === "{" || ch === "[" || ch === "(") depth++;
+    else if (ch === "}" || ch === "]" || ch === ")") depth--;
+    if (ch === "," && depth === 0) {
+      entries.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) entries.push(current.trim());
+  return entries;
+}
+
+// Reads one "key: value" or shorthand "key" entry; spreads, computed keys and methods are skipped
+function parseStaticEntry(entry) {
+  if (!entry || entry.startsWith("...") || entry.startsWith("[")) return null;
+  let m = entry.match(
+    /^(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][\w$]*))\s*:\s*([\s\S]+)$/,
+  );
+  if (m) return { key: m[1] || m[2] || m[3], value: m[4] };
+  m = entry.match(/^([A-Za-z_$][\w$]*)$/);
+  if (m) return { key: m[1], value: null };
+  return null;
+}
+
+// Only literal values reveal their type; anything computed is marked "unknown" instead of guessed
+function guessStaticValueType(valueExpr) {
+  const v = String(valueExpr || "").trim();
+  if (/^["'`]/.test(v)) return { type: "string" };
+  if (/^-?\d+(\.\d+)?$/.test(v)) return { type: "number" };
+  if (/^(true|false)$/.test(v)) return { type: "boolean" };
+  if (/^\[/.test(v)) return { type: "array", items: { type: "unknown" } };
+  if (/^\{/.test(v)) return { type: "object" };
+  return { type: "unknown" };
+}
+
+function parseStaticObjectFields(inner) {
+  const entries = splitStaticEntries(inner);
+  if (!entries) return null;
+  const properties = {};
+  let count = 0;
+  for (const entry of entries) {
+    if (count >= MAX_STATIC_RESPONSE_FIELDS) break;
+    const parsed = parseStaticEntry(entry);
+    if (!parsed) continue;
+    properties[parsed.key] =
+      parsed.value === null
+        ? { type: "unknown" }
+        : guessStaticValueType(parsed.value);
+    count++;
+  }
+  const keys = Object.keys(properties);
+  if (keys.length === 0) return null;
+  if (keys.length === 1 && keys[0] === "error") return null; // looks like an error reply
+  // "_source" lets the server replace this guess with a real runtime reply later
+  return { type: "object", properties, _source: "static" };
+}
+
+function extractResponseFieldsFromSegment(segment) {
+  try {
+    if (!segment || typeof segment !== "string") return null;
+    const pattern = new RegExp(STATIC_REPLY_PATTERN.source, "g");
+    let m;
+    while ((m = pattern.exec(segment)) !== null) {
+      const status = m[1] ? parseInt(m[1], 10) : 200;
+      if (status >= 400) continue;
+      const open = m.index + m[0].length - 1;
+      const close = findStaticClosingBrace(segment, open);
+      if (close === null) continue;
+      const after = segment.slice(close + 1, close + 120);
+      const afterStatus = after.match(/^\s*,\s*\{[^}]*\bstatus\s*:\s*(\d{3})/);
+      if (afterStatus && parseInt(afterStatus[1], 10) >= 400) continue;
+      // a status that is not a plain number (variable/expression) cannot be known to be a success
+      if (!afterStatus && /^\s*,\s*\{[^}]*\bstatus\b/.test(after)) continue;
+      const fields = parseStaticObjectFields(segment.slice(open + 1, close));
+      if (fields) return fields;
+    }
+  } catch (e) {}
+  return null;
+}
+
+// Marker that starts one method's code inside a file
+function staticMethodMarker(style, method) {
+  if (style === "app") {
+    return new RegExp(
+      "export\\s+(?:async\\s+)?function\\s+" +
+        method +
+        "\\b|export\\s+(?:const|let)\\s+" +
+        method +
+        "\\s*=",
+    );
+  }
+  // handles any variable that holds the request method, not just req.method
+  return new RegExp(
+    "(?:" +
+      METHOD_REF +
+      "\\s*===?\\s*['\"]" +
+      method +
+      "['\"]|case\\s*['\"]" +
+      method +
+      "['\"])",
+    "i",
+  );
+}
+
+// Finds where one HTTP method's code starts in a file (-1 if it cannot be told apart).
+// Reads the same method checks that detectMethodsFromFile reads, including the early-exit
+// guard "if (req.method !== 'X') return ..." (code after that guard belongs to X).
+function findStaticMethodMarkerIndex(content, style, method) {
+  const direct = staticMethodMarker(style, method).exec(content);
+  if (direct) return direct.index;
+  if (style === "app") return -1;
+
+  // handles any variable that holds the request method, not just req.method
+  const guardRe = new RegExp(
+    METHOD_REF + "\\s*!==?\\s*['\"]" + method + "['\"]",
+    "gi",
+  );
+  let hit;
+  while ((hit = guardRe.exec(content)) !== null) {
+    // A guard listing several allowed methods is not specific to one method, so skip it
+    const before = content.slice(Math.max(0, hit.index - 60), hit.index);
+    const afterStart = hit.index + hit[0].length;
+    const after = content.slice(afterStart, afterStart + 60);
+    const listsOtherMethods =
+      /[\w$.?]*method[\w$]*\s*!==?\s*['"][A-Za-z]+['"]\s*&&\s*$/i.test(
+        before,
+      ) ||
+      /^\s*&&\s*[\w$.?]*method[\w$]*\s*!==?\s*['"][A-Za-z]+['"]/i.test(after);
+    if (!listsOtherMethods) return hit.index;
+  }
+  return -1;
+}
+
+// For "export const GET = wrapper(handlerName)", returns the code of handlerName when it is
+// declared at the top level of the same file (null when it cannot be found, e.g. imported from elsewhere).
+function findStaticHandlerCode(content, markerIndex) {
+  const ref =
+    /^export\s+(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*(?::[^=]+)?=\s*(?:[A-Za-z_$][\w$.]*\s*\(\s*)*([A-Za-z_$][\w$]*)\s*(?:[,);]|\n|$)/.exec(
+      content.slice(markerIndex, markerIndex + 300),
+    );
+  if (!ref) return null;
+  const name = ref[1];
+  if (name === "async" || name === "function" || name === "await") return null;
+  const safe = name.replace(/[$]/g, "\\$&");
+  const declRe = new RegExp(
+    "(?:^|\\n)(?:export\\s+)?(?:async\\s+)?function\\s+" +
+      safe +
+      "\\s*[(<]|(?:^|\\n)(?:export\\s+)?(?:const|let|var)\\s+" +
+      safe +
+      "\\b[^=\\n]*=",
+  );
+  const decl = declRe.exec(content);
+  if (!decl) return null;
+  const bodyStart = decl.index + decl[0].length;
+  // the handler's code runs until the next top-level statement
+  const next =
+    /\n(?:export\s|async\s+function\s|function\s|const\s|let\s|var\s|class\s|interface\s|type\s)/.exec(
+      content.slice(bodyStart),
+    );
+  const end = next ? bodyStart + next.index : content.length;
+  return content.slice(decl.index, end);
+}
+
+// For files that handle several HTTP methods: returns only the code that belongs to one method,
+// or null when it cannot be told apart safely (so no guess is made)
+function extractResponseFieldsForMethod(content, method, allMethods, style) {
+  try {
+    let segment = content;
+    if (allMethods && allMethods.length > 1) {
+      const markers = [];
+      allMethods.forEach(function (m) {
+        // Uses the same method checks as method detection, so the file is split consistently
+        const index = findStaticMethodMarkerIndex(content, style, m);
+        if (index !== -1) markers.push({ method: m, index: index });
+      });
+      const own = markers.find(function (x) {
+        return x.method === method;
+      });
+      if (!own) return null;
+      // handler declared elsewhere in the same file and exported through a wrapper
+      if (style === "app") {
+        const handlerCode = findStaticHandlerCode(content, own.index);
+        if (handlerCode) return extractResponseFieldsFromSegment(handlerCode);
+      }
+      markers.sort(function (a, b) {
+        return a.index - b.index;
+      });
+      const pos = markers.indexOf(own);
+      const end =
+        pos + 1 < markers.length ? markers[pos + 1].index : content.length;
+      segment = content.slice(own.index, end);
+    }
+    return extractResponseFieldsFromSegment(segment);
+  } catch (e) {
+    return null;
+  }
+}
+
+// For route definitions in one file (app.get(...), router.post(...)): the code from this route
+// definition up to the next one
+function extractResponseFieldsForRoute(
+  content,
+  startIndex,
+  routePatternSource,
+) {
+  try {
+    const re = new RegExp(routePatternSource, "gi");
+    let end = content.length;
+    let hit;
+    while ((hit = re.exec(content)) !== null) {
+      if (hit.index > startIndex) {
+        end = hit.index;
+        break;
+      }
+    }
+    return extractResponseFieldsFromSegment(content.slice(startIndex, end));
+  } catch (e) {
+    return null;
+  }
+}
+
+// For live Express route handlers: reads the handler source, last handler first
+function extractResponseFieldsFromHandlers(stack, method) {
+  try {
+    for (let i = stack.length - 1; i >= 0; i--) {
+      const layer = stack[i];
+      if (layer.method && String(layer.method).toUpperCase() !== method)
+        continue;
+      const fn = layer.handle || layer;
+      if (typeof fn !== "function") continue;
+      const src = Function.prototype.toString.call(fn);
+      const fields = extractResponseFieldsFromSegment(src);
+      if (fields) return fields;
+    }
+  } catch (e) {}
+  return null;
 }
 
 module.exports = {

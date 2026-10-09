@@ -1,11 +1,3 @@
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
-
-[project]
-name = "botversion-sdk"
-version = "2.0.0"
-description = "BotVersion AI Agent SDK for FastAPI, Flask, and Django"
-authors = [{name = "Saurav Dhakal", email = "sauravdhakal828@gmail.com"}]
-requires-python = ">=3.8"
-dependencies = []

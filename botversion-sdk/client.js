@@ -19,6 +19,8 @@ function BotVersionClient(options) {
   this._queue = [];
   this._flushTimer = null;
   this._flushDelay = options.flushDelay || 3000;
+  // Tracks in-flight updates per endpoint so they are sent one after another
+  this._inflight = {};
   var self = this;
   process.on("beforeExit", function () {
     if (self._queue.length > 0) self._flush();
@@ -74,13 +76,10 @@ BotVersionClient.prototype._flush = function () {
   var toSend = self._queue.slice();
   self._queue = [];
 
-  self
-    ._post("/api/sdk/register-endpoints", {
-      workspaceKey: self.apiKey,
-      endpoints: toSend,
-    })
-    .then(function (data) {})
-    .catch(function (err) {});
+  self._post("/api/sdk/register-endpoints", {
+    workspaceKey: self.apiKey,
+    endpoints: toSend,
+  });
 };
 
 /**
@@ -89,14 +88,38 @@ BotVersionClient.prototype._flush = function () {
 BotVersionClient.prototype.updateEndpoint = function (endpoint) {
   var self = this;
 
-  return self._post("/api/sdk/update-endpoint", {
+  var payload = {
     workspaceKey: self.apiKey,
     method: endpoint.method,
     path: endpoint.path,
     requestBody: endpoint.requestBody || null,
     responseBody: endpoint.responseBody || null,
     detectedBy: endpoint.detectedBy || "runtime",
-  });
+  };
+
+  // Updates for the same endpoint go out one after another, so a later update
+  // (e.g. its reply shape) can never race the first registration of that endpoint.
+  var key = String(endpoint.method).toUpperCase() + ":" + endpoint.path;
+  var previous = self._inflight[key] || Promise.resolve();
+  var send = function () {
+    return self._post("/api/sdk/update-endpoint", payload).then(
+      function (res) {
+        return res;
+      },
+      function (err) {
+        throw err;
+      },
+    );
+  };
+  var current = previous.then(send, send);
+  self._inflight[key] = current;
+
+  var cleanup = function () {
+    if (self._inflight[key] === current) delete self._inflight[key];
+  };
+  current.then(cleanup, cleanup);
+
+  return current;
 };
 
 BotVersionClient.prototype.registerRoutePatterns = function (

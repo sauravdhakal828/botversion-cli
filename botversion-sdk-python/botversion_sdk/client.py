@@ -6,12 +6,13 @@ import urllib.parse
 import urllib.error
 import atexit
 import time
+from collections import deque
 
 class BotVersionClient:
 
     def __init__(self, options):
         self.api_key = options["api_key"]
-        platform_url = options.get("platform_url", "https://botversion.com")
+        platform_url = options.get("platform_url", "https://console.botversion.com")
 
         self.platform_url = platform_url
         self.debug = options.get("debug", False)
@@ -23,6 +24,10 @@ class BotVersionClient:
         self._flush_timer = None
         self._lock = threading.Lock()
         atexit.register(self._flush)
+
+        # Per-endpoint send queue: updates for the same endpoint go out one after another
+        self._pending_updates = {}
+        self._pending_lock = threading.Lock()
 
     # ── Register endpoints (batched) ─────────────────────────────────────────
 
@@ -73,18 +78,52 @@ class BotVersionClient:
     # ── Update single endpoint (runtime interceptor) ─────────────────────────
 
     def update_endpoint(self, endpoint):
+        payload = {
+            "workspaceKey": self.api_key,
+            "method": endpoint.get("method"),
+            "path": endpoint.get("path"),
+            "requestBody": endpoint.get("request_body"),
+            "responseBody": endpoint.get("response_body"),
+            "detectedBy": endpoint.get("detected_by", "runtime"),
+        }
+
+        # Queued here, in the caller's thread, so updates for one endpoint always go out
+        # in the order they were requested (prevents request/reply ordering races).
+        key = f"{str(endpoint.get('method')).upper()}:{endpoint.get('path')}"
+        with self._pending_lock:
+            queue = self._pending_updates.get(key)
+            if queue is not None:
+                queue.append(payload)   # a sender is already running for this endpoint
+                return
+            self._pending_updates[key] = deque([payload])
+
         try:
-            self._post("/api/sdk/update-endpoint", {
-                "workspaceKey": self.api_key,
-                "method": endpoint.get("method"),
-                "path": endpoint.get("path"),
-                "requestBody": endpoint.get("request_body"),
-                "responseBody": endpoint.get("response_body"),
-                "detectedBy": endpoint.get("detected_by", "runtime"),
-            })
-        except Exception as e:
-            if self.debug:
-                print(f"[botversion] update_endpoint failed: {e}")
+            threading.Thread(target=self._drain_updates, args=(key,), daemon=True).start()
+        except Exception:
+            # If no sender could start, clear the key so later updates are not stuck behind it
+            with self._pending_lock:
+                self._pending_updates.pop(key, None)
+
+    def _drain_updates(self, key):
+        # Sends queued updates for one endpoint, one after another, off the request path
+        while True:
+            with self._pending_lock:
+                queue = self._pending_updates.get(key)
+                if not queue:
+                    self._pending_updates.pop(key, None)
+                    return
+                next_payload = queue.popleft()
+            try:
+                self._post("/api/sdk/update-endpoint", next_payload)
+                if self.debug:
+                    print(
+                        f"[botversion] sent update {key} "
+                        f"(request={bool(next_payload.get('requestBody'))}, "
+                        f"response={bool(next_payload.get('responseBody'))})"
+                    )
+            except Exception as e:
+                if self.debug:
+                    print(f"[botversion] update_endpoint failed: {e}")
 
 
     # ── Register frontend route patterns ─────────────────────────────────────────

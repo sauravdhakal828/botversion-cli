@@ -3,6 +3,8 @@ import re
 import inspect
 import typing
 from typing import Annotated
+import ast
+import textwrap
 
 
 def scan_routes(app, framework):
@@ -30,6 +32,10 @@ def scan_routes(app, framework):
         result = scan_pyramid_routes(app)
     elif framework == "cherrypy":
         result = scan_cherrypy_routes(app)
+
+    for endpoint in result:
+        if "routeParamMap" not in endpoint:
+            endpoint["routeParamMap"] = build_route_param_map(endpoint.get("path", ""))
 
     return result
 
@@ -74,6 +80,7 @@ def scan_fastapi_routes(app):
                     "path": normalized_path,
                     "description": generate_description(method, normalized_path, handler_name),
                     "requestBody": extract_request_body_schema(route, method),
+                    "responseBody": extract_fastapi_response_schema(route) or extract_static_response_from_callable(_resolve_view_handler(getattr(route, "endpoint", None), method)),
                     "detectedBy": "static-scan",
                 })
 
@@ -129,6 +136,7 @@ def scan_flask_routes(app):
                         extract_restx_resource_schema(app, rule, method) or
                         (build_param_schema(params) if method != "GET" and params else None)
                     ),
+                    "responseBody": extract_static_response_from_callable(_resolve_view_handler(handler_fn, method)),
                     "detectedBy": "static-scan",
                 })
 
@@ -621,8 +629,59 @@ def _walk_django_patterns(patterns, prefix, endpoints, seen):
                     "path": path,
                     "description": generate_description(method, path, handler_name),
                     "requestBody": extract_drf_schema(pattern.callback, method) or (build_param_schema(params) if method != "GET" and params else None),
+                    "responseBody": extract_static_response_from_callable(_resolve_view_handler(pattern.callback, method)),
                     "detectedBy": "static-scan",
                 })
+
+
+_METHOD_ORDER = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+
+
+def _detect_methods_from_source(fn):
+    """
+    Reads a function-based view's code to learn which HTTP methods it handles
+    (method checks and Django decorators). Returns None if nothing is recognised.
+    """
+    try:
+        fn = inspect.unwrap(fn)
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    except Exception:
+        return None
+
+    from_decorators, checked, guarded = set(), set(), set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # decorators that restrict methods, e.g. @require_POST, @require_http_methods([...])
+            for dec in node.decorator_list:
+                target = dec.func if isinstance(dec, ast.Call) else dec
+                name = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
+                if name == "require_POST":
+                    from_decorators.add("POST")
+                elif name in ("require_GET", "require_safe"):
+                    from_decorators.add("GET")
+                elif name == "require_http_methods" and isinstance(dec, ast.Call) and dec.args:
+                    arg = dec.args[0]
+                    if isinstance(arg, (ast.List, ast.Tuple, ast.Set)):
+                        for e in arg.elts:
+                            if isinstance(e, ast.Constant) and isinstance(e.value, str):
+                                from_decorators.add(e.value.upper())
+        elif isinstance(node, ast.Compare):
+            info = _method_test(node)
+            if info:
+                methods, negated = info
+                (guarded if negated else checked).update(methods)
+
+    def ordered(found):
+        return [m for m in _METHOD_ORDER if m in found] or None
+
+    if from_decorators:
+        return ordered(from_decorators)      # decorator states the allowed methods exactly
+    if guarded:
+        return ordered(guarded)              # "if method != X: reject" means only X is accepted
+    if checked:
+        return ordered(checked | {"GET"})    # "if method == X: ..." leaves other requests falling through
+    return None
 
 
 def _detect_django_methods(callback):
@@ -646,8 +705,9 @@ def _detect_django_methods(callback):
         all_methods = ["GET", "POST", "PUT", "PATCH", "DELETE"]
         return [m for m in all_methods if hasattr(cls, m.lower())]
 
-    # Function-based view — default to GET + POST
-    return ["GET", "POST"]
+    # Function-based view — read its code for method checks/decorators;
+    # fall back to GET + POST only when nothing recognisable is found
+    return _detect_methods_from_source(callback) or ["GET", "POST"]
 
 
 def _django_pattern_to_path(pattern):
@@ -736,6 +796,37 @@ def build_param_schema(params):
     """
     properties = {p: {"type": "string"} for p in params}
     return {"type": "object", "properties": properties}
+
+def build_route_param_map(route_path):
+    """
+    Gives route params more descriptive names based on their parent
+    segment, mirroring the JS SDK's buildRouteParamMap().
+    e.g. /projects/:id -> {"id": "projectId"}
+    """
+    param_map = {}
+    parts = [p for p in route_path.split("/") if p]
+
+    for i, part in enumerate(parts):
+        match = re.match(r"^:([a-zA-Z_][a-zA-Z0-9_]*)$", part)
+        if not match:
+            continue
+        param_name = match.group(1)
+
+        if param_name not in ("id", "slug", "param"):
+            param_map[param_name] = param_name
+            continue
+
+        parent_segment = parts[i - 1] if i > 0 else None
+        if parent_segment:
+            clean_parent = parent_segment.lstrip(":")
+            singular = re.sub(r"ies$", "y", clean_parent)
+            if singular == clean_parent:
+                singular = re.sub(r"s$", "", clean_parent)
+            param_map[param_name] = singular + "Id"
+        else:
+            param_map[param_name] = "id"
+
+    return param_map
 
 
 def generate_description(method, path, handler_name=None):
@@ -892,6 +983,7 @@ def scan_starlette_routes(app):
                     "path": normalized_path,
                     "description": generate_description(method, normalized_path, handler_name),
                     "requestBody": None,
+                    "responseBody": extract_static_response_from_callable(_resolve_view_handler(getattr(route, "endpoint", None), method)),
                     "detectedBy": "static-scan",
                 })
 
@@ -947,6 +1039,7 @@ def scan_sanic_routes(app):
                     "path": normalized_path,
                     "description": generate_description(method, normalized_path, handler_name),
                     "requestBody": None,
+                    "responseBody": extract_static_response_from_callable(_resolve_view_handler(handler, method)),
                     "detectedBy": "static-scan",
                 })
 
@@ -994,6 +1087,7 @@ def scan_falcon_routes(app):
                                 "path": normalized,
                                 "description": generate_description(method, normalized, None),
                                 "requestBody": None,
+                                "responseBody": extract_static_response_from_callable(getattr(resource, f"on_{method.lower()}", None)),
                                 "detectedBy": "static-scan",
                             })
 
@@ -1047,6 +1141,7 @@ def scan_bottle_routes(app):
                 "path": normalized_path,
                 "description": generate_description(method, normalized_path, handler_name),
                 "requestBody": None,
+                "responseBody": extract_static_response_from_callable(route.callback),
                 "detectedBy": "static-scan",
             })
 
@@ -1089,6 +1184,7 @@ def scan_aiohttp_routes(app):
                     "path": normalized_path,
                     "description": generate_description(method, normalized_path, handler_name),
                     "requestBody": None,
+                    "responseBody": extract_static_response_from_callable(_resolve_view_handler(handler, method)),
                     "detectedBy": "static-scan",
                 })
 
@@ -1150,6 +1246,7 @@ def scan_tornado_routes(app):
                         "path": path,
                         "description": generate_description(method, path, handler_class.__name__),
                         "requestBody": None,
+                        "responseBody": extract_static_response_from_callable(getattr(handler_class, method_name, None)),
                         "detectedBy": "static-scan",
                     })
 
@@ -1193,8 +1290,11 @@ def scan_pyramid_routes(app):
             # Try to find request_method predicate for this route
             related = introspector.related(intr["introspectable"])
             methods_found = set()
+            view_callable = None   # the function that serves this route, used to guess its reply shape
 
             for rel in related:
+                if view_callable is None and rel.get("callable"):
+                    view_callable = rel.get("callable")
                 predicates = rel.get("predicates", "")
                 for method in ALL_METHODS:
                     if method in str(predicates):
@@ -1215,6 +1315,7 @@ def scan_pyramid_routes(app):
                     "path": normalized_path,
                     "description": generate_description(method, normalized_path, route_name),
                     "requestBody": None,
+                    "responseBody": extract_static_response_from_callable(_resolve_view_handler(view_callable, method)),
                     "detectedBy": "static-scan",
                 })
 
@@ -1252,6 +1353,7 @@ def scan_cherrypy_routes(app):
                             "path": path,
                             "description": generate_description(method, path, fn.__name__),
                             "requestBody": None,
+                            "responseBody": extract_static_response_from_callable(fn),
                             "detectedBy": "static-scan",
                         })
 
@@ -1267,6 +1369,7 @@ def scan_cherrypy_routes(app):
                         "path": path,
                         "description": generate_description("GET", path, "index"),
                         "requestBody": None,
+                        "responseBody": extract_static_response_from_callable(index_fn),
                         "detectedBy": "static-scan",
                     })
 
@@ -1298,3 +1401,917 @@ def scan_cherrypy_routes(app):
         pass
 
     return endpoints
+
+# ── Static (build-time) scanning — no live app object required ──────────────
+# Used by the CLI (bin/scan_endpoints.py) since there's no running server
+# at build time. Parses .py files directly instead of introspecting a live
+# app instance.
+
+import os
+
+SKIP_DIRS = {"node_modules", ".git", "venv", "env", ".venv", "__pycache__",
+             "migrations", "dist", "build", ".tox", "site-packages"}
+
+
+def scan_routes_static(cwd, framework):
+    if framework in ("fastapi", "starlette", "sanic"):
+        result = _scan_decorator_style_static(cwd)
+    elif framework == "flask":
+        result = _scan_flask_static(cwd)
+    elif framework == "django":
+        result = _scan_django_static(cwd)
+    elif framework == "falcon":
+        result = _scan_falcon_static(cwd)
+    elif framework == "bottle":
+        result = _scan_bottle_static(cwd)
+    elif framework == "aiohttp":
+        result = _scan_aiohttp_static(cwd)
+    elif framework == "tornado":
+        result = _scan_tornado_static(cwd)
+    elif framework == "pyramid":
+        result = _scan_pyramid_static(cwd)
+    else:
+        # CherryPy's routing is a runtime object tree discovered by
+        # walking live class instances — it can't be approximated
+        # reliably via static text scanning, so it's not supported for
+        # build-time/serverless scans. The live interceptor still works
+        # fine for CherryPy on always-on servers.
+        result = []
+
+    for endpoint in result:
+        if "routeParamMap" not in endpoint:
+            endpoint["routeParamMap"] = build_route_param_map(endpoint.get("path", ""))
+
+    return result
+
+
+def _walk_py_files(cwd):
+    for root, dirs, files in os.walk(cwd):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
+        for f in files:
+            if f.endswith(".py"):
+                yield os.path.join(root, f)
+
+
+def _scan_decorator_style_static(cwd):
+    """
+    Handles FastAPI / Starlette / Sanic-style decorators:
+      @app.get("/path")
+      @router.post("/path")
+    """
+    endpoints = []
+    seen = set()
+
+    pattern = re.compile(
+        r"@(?:\w+)\.(get|post|put|delete|patch)\s*\(\s*[\"']([^\"']+)[\"']",
+        re.IGNORECASE,
+    )
+
+    for filepath in _walk_py_files(cwd):
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as fh:
+                content = fh.read()
+        except Exception:
+            continue
+
+        tree = parse_source_tree(content)
+
+        for match in pattern.finditer(content):
+            method = match.group(1).upper()
+            path = match.group(2)
+            normalized = re.sub(r"\{([^}]+)\}", r":\1", path)
+            key = f"{method}:{normalized}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            body_fields = _extract_body_fields_static(content) if method in ("POST", "PUT", "PATCH") else None
+
+            endpoints.append({
+                "method": method,
+                "path": normalized,
+                "description": generate_description(method, normalized, None),
+                "requestBody": body_fields,
+                "responseBody": extract_static_response_at(tree, content, match.start()),
+                "detectedBy": "static-scan-file",
+            })
+
+    return endpoints
+
+
+def _find_matching_paren(text, open_idx):
+    """
+    Given the index of an opening '(' in text, return the index of its
+    matching closing ')'. Used to bound a single decorator's argument
+    list precisely, instead of using a regex that can drift across
+    unrelated decorators later in the file.
+    """
+    depth = 0
+    i = open_idx
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def _scan_flask_static(cwd):
+    """
+    Handles Flask-style decorators:
+      @app.route("/path", methods=["POST"])
+      @bp.route("/path")   (Blueprint, defaults to GET)
+
+    Each decorator's argument list is isolated using paren-matching
+    (see _find_matching_paren) rather than a DOTALL regex. The previous
+    DOTALL approach could match "methods=[...]" belonging to a LATER,
+    unrelated @app.route(...) decorator further down the file, which
+    both mis-tagged the earlier route's methods and caused the later
+    route to be skipped entirely.
+    """
+    endpoints = []
+    seen = set()
+
+    decorator_start = re.compile(r"@(?:\w+)\.route\s*\(", re.IGNORECASE)
+
+    for filepath in _walk_py_files(cwd):
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as fh:
+                content = fh.read()
+        except Exception:
+            continue
+
+        tree = parse_source_tree(content)
+
+        for start_match in decorator_start.finditer(content):
+            open_paren_idx = start_match.end() - 1  # index of the '(' itself
+            close_paren_idx = _find_matching_paren(content, open_paren_idx)
+            if close_paren_idx is None:
+                continue
+
+            # Only look inside THIS decorator's own argument list
+            args_text = content[open_paren_idx + 1:close_paren_idx]
+
+            path_match = re.search(r"[\"']([^\"']+)[\"']", args_text)
+            if not path_match:
+                continue
+            path = path_match.group(1)
+
+            methods_match = re.search(r"methods\s*=\s*\[([^\]]*)\]", args_text)
+            if methods_match:
+                methods = [
+                    m.strip().strip("'\"").upper()
+                    for m in methods_match.group(1).split(",")
+                    if m.strip()
+                ]
+                if not methods:
+                    methods = ["GET"]
+            else:
+                methods = ["GET"]
+
+            normalized = normalize_flask_path(path)
+
+            for method in methods:
+                key = f"{method}:{normalized}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                body_fields = _extract_body_fields_static(content) if method in ("POST", "PUT", "PATCH") else None
+
+                endpoints.append({
+                    "method": method,
+                    "path": normalized,
+                    "description": generate_description(method, normalized, None),
+                    "requestBody": body_fields,
+                    "responseBody": extract_static_response_at(tree, content, start_match.start(), method),
+                    "detectedBy": "static-scan-file",
+                })
+
+    return endpoints
+
+
+def _scan_django_static(cwd):
+    """
+    Handles Django urls.py:
+      path("users/<int:id>/", views.user_detail)
+      re_path(r"^users/(?P<id>\\d+)/$", views.user_detail)
+    """
+    endpoints = []
+    seen = set()
+
+    pattern = re.compile(
+        r"(?:path|re_path)\s*\(\s*r?[\"']([^\"']+)[\"']",
+        re.IGNORECASE,
+    )
+
+    for filepath in _walk_py_files(cwd):
+        if "urls.py" not in filepath:
+            continue
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as fh:
+                content = fh.read()
+        except Exception:
+            continue
+
+        for match in pattern.finditer(content):
+            raw_path = match.group(1)
+            normalized = _django_pattern_to_path(raw_path)
+
+            # Static scan can't reliably detect the view's supported HTTP
+            # methods without importing it — default to GET + POST as the
+            # common case (consistent with function-based view fallback
+            # in _detect_django_methods).
+            for method in ["GET", "POST"]:
+                key = f"{method}:{normalized}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                endpoints.append({
+                    "method": method,
+                    "path": normalized,
+                    "description": generate_description(method, normalized, None),
+                    "requestBody": None,
+                    "detectedBy": "static-scan-file",
+                })
+
+    return endpoints
+
+def _scan_falcon_static(cwd):
+    """
+    Handles Falcon-style route registration:
+      app.add_route('/path', SomeResource())
+    Falcon resources define on_get/on_post/etc as class methods, so we
+    can't perfectly link one add_route() call to its resource's methods
+    without executing the code. As a best-effort approximation, we scan
+    the whole file for any on_<method> definitions and apply that method
+    set to every add_route() path found in the same file.
+    """
+    endpoints = []
+    seen = set()
+
+    route_pattern = re.compile(r"add_route\s*\(\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
+    method_def_pattern = re.compile(r"def\s+on_(get|post|put|delete|patch)\b", re.IGNORECASE)
+
+    for filepath in _walk_py_files(cwd):
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as fh:
+                content = fh.read()
+        except Exception:
+            continue
+
+        route_matches = list(route_pattern.finditer(content))
+        if not route_matches:
+            continue
+
+        methods_in_file = sorted({m.group(1).upper() for m in method_def_pattern.finditer(content)})
+        if not methods_in_file:
+            methods_in_file = ["GET"]
+
+        for match in route_matches:
+            path = match.group(1)
+            normalized = re.sub(r"\{([^:}]+)(?::[^}]+)?\}", r":\1", path)
+
+            for method in methods_in_file:
+                key = f"{method}:{normalized}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                body_fields = _extract_body_fields_static(content) if method in ("POST", "PUT", "PATCH") else None
+
+                endpoints.append({
+                    "method": method,
+                    "path": normalized,
+                    "description": generate_description(method, normalized, None),
+                    "requestBody": body_fields,
+                    "detectedBy": "static-scan-file",
+                })
+
+    return endpoints
+
+
+def _scan_bottle_static(cwd):
+    """
+    Handles Bottle-style routes:
+      @app.route('/path', method='POST')
+      @app.get('/path')  /  @app.post('/path')  (shorthand decorators)
+    """
+    endpoints = []
+    seen = set()
+
+    shorthand_pattern = re.compile(
+        r"@(?:\w+)\.(get|post|put|delete|patch)\s*\(\s*[\"']([^\"']+)[\"']",
+        re.IGNORECASE,
+    )
+    route_decorator_start = re.compile(r"@(?:\w+)\.route\s*\(", re.IGNORECASE)
+
+    for filepath in _walk_py_files(cwd):
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as fh:
+                content = fh.read()
+        except Exception:
+            continue
+
+        tree = parse_source_tree(content)
+
+        for match in shorthand_pattern.finditer(content):
+            method = match.group(1).upper()
+            path = match.group(2)
+            normalized = re.sub(r"<([^:>]+)(?::[^>]+)?>", r":\1", path)
+
+            key = f"{method}:{normalized}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            body_fields = _extract_body_fields_static(content) if method in ("POST", "PUT", "PATCH") else None
+
+            endpoints.append({
+                "method": method,
+                "path": normalized,
+                "description": generate_description(method, normalized, None),
+                "requestBody": body_fields,
+                "responseBody": extract_static_response_at(tree, content, match.start()),
+                "detectedBy": "static-scan-file",
+            })
+
+        for start_match in route_decorator_start.finditer(content):
+            open_idx = start_match.end() - 1
+            close_idx = _find_matching_paren(content, open_idx)
+            if close_idx is None:
+                continue
+            args_text = content[open_idx + 1:close_idx]
+
+            path_match = re.search(r"[\"']([^\"']+)[\"']", args_text)
+            if not path_match:
+                continue
+            path = path_match.group(1)
+
+            method_match = re.search(r"method\s*=\s*[\"'](\w+)[\"']", args_text)
+            method = method_match.group(1).upper() if method_match else "GET"
+
+            normalized = re.sub(r"<([^:>]+)(?::[^>]+)?>", r":\1", path)
+
+            key = f"{method}:{normalized}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            body_fields = _extract_body_fields_static(content) if method in ("POST", "PUT", "PATCH") else None
+
+            endpoints.append({
+                "method": method,
+                "path": normalized,
+                "description": generate_description(method, normalized, None),
+                "requestBody": body_fields,
+                "responseBody": extract_static_response_at(tree, content, start_match.start()),
+                "detectedBy": "static-scan-file",
+            })
+
+    return endpoints
+
+
+def _scan_aiohttp_static(cwd):
+    """
+    Handles aiohttp-style route registration:
+      app.router.add_get('/path', handler)
+      app.router.add_post('/path', handler)
+      app.router.add_route('POST', '/path', handler)
+    """
+    endpoints = []
+    seen = set()
+
+    shorthand_pattern = re.compile(
+        r"add_(get|post|put|delete|patch)\s*\(\s*[\"']([^\"']+)[\"']",
+        re.IGNORECASE,
+    )
+    generic_pattern = re.compile(
+        r"add_route\s*\(\s*[\"'](\w+)[\"']\s*,\s*[\"']([^\"']+)[\"']",
+        re.IGNORECASE,
+    )
+
+    for filepath in _walk_py_files(cwd):
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as fh:
+                content = fh.read()
+        except Exception:
+            continue
+
+        for pattern in (shorthand_pattern, generic_pattern):
+            for match in pattern.finditer(content):
+                method = match.group(1).upper()
+                path = match.group(2)
+                normalized = re.sub(r"\{([^:}]+)(?::[^}]+)?\}", r":\1", path)
+
+                key = f"{method}:{normalized}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                body_fields = _extract_body_fields_static(content) if method in ("POST", "PUT", "PATCH") else None
+
+                endpoints.append({
+                    "method": method,
+                    "path": normalized,
+                    "description": generate_description(method, normalized, None),
+                    "requestBody": body_fields,
+                    "detectedBy": "static-scan-file",
+                })
+
+    return endpoints
+
+
+def _scan_tornado_static(cwd):
+    """
+    Handles Tornado-style URL specs:
+      (r"/path", SomeHandler)
+    Tornado handler methods (get/post/etc) live on the handler class, so
+    like Falcon, we approximate by scanning the whole file for any
+    get/post/put/delete/patch method definitions and applying that set
+    to every URL spec found in the same file. Only runs on files that
+    look like Tornado app files, to avoid matching unrelated tuples.
+    """
+    endpoints = []
+    seen = set()
+
+    url_spec_pattern = re.compile(r"\(\s*r?[\"']([^\"']+)[\"']\s*,\s*(\w+)\s*\)")
+    method_def_pattern = re.compile(r"def\s+(get|post|put|delete|patch)\s*\(\s*self", re.IGNORECASE)
+
+    for filepath in _walk_py_files(cwd):
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as fh:
+                content = fh.read()
+        except Exception:
+            continue
+
+        is_tornado_file = "tornado" in content.lower() and (
+            "Application(" in content or "URLSpec" in content
+        )
+        if not is_tornado_file:
+            continue
+
+        url_matches = list(url_spec_pattern.finditer(content))
+        if not url_matches:
+            continue
+
+        methods_in_file = sorted({m.group(1).upper() for m in method_def_pattern.finditer(content)})
+        if not methods_in_file:
+            methods_in_file = ["GET"]
+
+        for match in url_matches:
+            path = match.group(1)
+            normalized = re.sub(r"\(\?P<([^>]+)>[^)]+\)", r":\1", path)
+            normalized = re.sub(r"[\\^$]", "", normalized)
+            if not normalized.startswith("/"):
+                normalized = "/" + normalized
+
+            for method in methods_in_file:
+                key = f"{method}:{normalized}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                body_fields = _extract_body_fields_static(content) if method in ("POST", "PUT", "PATCH") else None
+
+                endpoints.append({
+                    "method": method,
+                    "path": normalized,
+                    "description": generate_description(method, normalized, None),
+                    "requestBody": body_fields,
+                    "detectedBy": "static-scan-file",
+                })
+
+    return endpoints
+
+
+def _scan_pyramid_static(cwd):
+    """
+    Handles Pyramid-style route registration:
+      config.add_route('name', '/path')
+    Static scan can't reliably determine which HTTP methods a route's
+    view supports without executing the config, so — consistent with
+    the Django static scanner's fallback — we default to GET + POST.
+    """
+    endpoints = []
+    seen = set()
+
+    pattern = re.compile(r"add_route\s*\(\s*[\"'][^\"']+[\"']\s*,\s*[\"']([^\"']+)[\"']")
+
+    for filepath in _walk_py_files(cwd):
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as fh:
+                content = fh.read()
+        except Exception:
+            continue
+
+        for match in pattern.finditer(content):
+            path = match.group(1)
+            normalized = re.sub(r"\{([^:}]+)(?::[^}]+)?\}", r":\1", path)
+            if not normalized.startswith("/"):
+                normalized = "/" + normalized
+
+            for method in ("GET", "POST"):
+                key = f"{method}:{normalized}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                endpoints.append({
+                    "method": method,
+                    "path": normalized,
+                    "description": generate_description(method, normalized, None),
+                    "requestBody": None,
+                    "detectedBy": "static-scan-file",
+                })
+
+    return endpoints
+
+
+def _extract_body_fields_static(content):
+    """
+    Best-effort body field extraction from source text — mirrors the JS
+    static file scanner's approach. Looks for common request-body access
+    patterns without needing to import/execute the file.
+    """
+    fields = set()
+
+    for m in re.finditer(r"request\.json(?:\.get\(|\[)\s*['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", content):
+        fields.add(m.group(1))
+    for m in re.finditer(r"request\.data(?:\.get\(|\[)\s*['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", content):
+        fields.add(m.group(1))
+    for m in re.finditer(r"request\.form(?:\.get\(|\[)\s*['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]", content):
+        fields.add(m.group(1))
+
+    if not fields:
+        return None
+
+    properties = {f: {"type": infer_field_type(f, content)} for f in fields}
+    return {"type": "object", "properties": properties}
+
+
+def detect_framework_from_deps(cwd):
+    """
+    Detects the backend framework from dependency declarations, since
+    Python has no single 'package.json' convention. Checks requirements.txt,
+    pyproject.toml, and Pipfile, in that order.
+    """
+    FRAMEWORK_PACKAGES = [
+        ("fastapi", "fastapi"),
+        ("flask", "flask"),
+        ("django", "django"),
+        ("starlette", "starlette"),
+        ("sanic", "sanic"),
+        ("falcon", "falcon"),
+        ("bottle", "bottle"),
+        ("aiohttp", "aiohttp"),
+        ("tornado", "tornado"),
+        ("pyramid", "pyramid"),
+        ("cherrypy", "cherrypy"),
+    ]
+
+    candidates = [
+        os.path.join(cwd, "requirements.txt"),
+        os.path.join(cwd, "pyproject.toml"),
+        os.path.join(cwd, "Pipfile"),
+    ]
+
+    combined = ""
+    for filepath in candidates:
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8", errors="ignore") as fh:
+                    combined += fh.read().lower() + "\n"
+            except Exception:
+                continue
+
+    for pkg_name, framework in FRAMEWORK_PACKAGES:
+        if pkg_name in combined:
+            return framework
+
+    return None
+
+# ── Static response-shape guessing ───────────────────────────────────────────
+# Best-effort: reads field names from reply objects written out directly in the code
+# (e.g. return {"id": 1, "name": "x"} or jsonify({...})). Replies built from variables are
+# left empty on purpose; real runtime replies fill those in later and replace any guess.
+
+MAX_STATIC_RESPONSE_FIELDS = 50
+_STATIC_REPLY_FUNCS = {
+    "jsonify", "JSONResponse", "ORJSONResponse", "UJSONResponse", "JsonResponse",
+    "json_response", "json", "Response", "write",
+}
+
+
+def _static_func_name(call):
+    f = call.func
+    if isinstance(f, ast.Name):
+        return f.id
+    if isinstance(f, ast.Attribute):
+        return f.attr
+    return ""
+
+
+def _static_dict_entries(d):
+    # Spreads (**x) and non-text keys are skipped
+    return [
+        (k.value, v) for k, v in zip(d.keys, d.values)
+        if isinstance(k, ast.Constant) and isinstance(k.value, str)
+    ]
+
+
+def _static_status(node, default=200):
+    if isinstance(node, ast.Constant) and isinstance(node.value, int):
+        return node.value
+    name = node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", "")
+    m = re.search(r"(?:^|_)([45]\d\d)(?:_|$)", name or "")
+    return int(m.group(1)) if m else default
+
+
+def _static_value_type(node):
+    # Only literal values reveal their type; anything computed is marked "unknown"
+    if isinstance(node, ast.Constant):
+        v = node.value
+        if isinstance(v, bool):
+            return {"type": "boolean"}
+        if isinstance(v, (int, float)):
+            return {"type": "number"}
+        if isinstance(v, str):
+            return {"type": "string"}
+        return {"type": "unknown"}
+    if isinstance(node, ast.JoinedStr):
+        return {"type": "string"}
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return {"type": "array", "items": {"type": "unknown"}}
+    if isinstance(node, ast.Dict):
+        return {"type": "object"}
+    return {"type": "unknown"}
+
+
+def _static_reply_entries(node):
+    """If this piece of code sends a reply written as an object, returns (entries, status)."""
+    status = 200
+    if isinstance(node, ast.Return) and node.value is not None:
+        value = node.value
+        if isinstance(value, ast.Tuple) and value.elts:
+            if len(value.elts) > 1:
+                status = _static_status(value.elts[1])
+            value = value.elts[0]
+        if isinstance(value, ast.Dict):
+            return _static_dict_entries(value), status
+        return None
+    if isinstance(node, ast.Call) and _static_func_name(node) in _STATIC_REPLY_FUNCS:
+        for kw in node.keywords:
+            if kw.arg in ("status", "status_code"):
+                status = _static_status(kw.value)
+        if node.args and isinstance(node.args[0], ast.Dict):
+            return _static_dict_entries(node.args[0]), status
+        for kw in node.keywords:
+            if kw.arg in ("content", "data", "body") and isinstance(kw.value, ast.Dict):
+                return _static_dict_entries(kw.value), status
+        if _static_func_name(node) == "jsonify" and not node.args and node.keywords:
+            return [(kw.arg, kw.value) for kw in node.keywords if kw.arg], status
+        return None
+    if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
+        if any(isinstance(t, ast.Attribute) and t.attr == "media" for t in node.targets):
+            return _static_dict_entries(node.value), status
+    return None
+
+
+def extract_response_from_ast(root):
+    """Finds the first successful reply written as an object inside a function."""
+    try:
+        # replies sent with an error status, e.g. `return jsonify({...}), 404`, are not the normal shape
+        error_ids = set()
+        for node in ast.walk(root):
+            if isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple) and len(node.value.elts) > 1:
+                if _static_status(node.value.elts[1]) >= 400:
+                    error_ids.add(id(node.value.elts[0]))
+
+        found = []
+        for node in ast.walk(root):
+            if id(node) in error_ids:
+                continue
+            reply = _static_reply_entries(node)
+            if reply:
+                found.append((getattr(node, "lineno", 0), reply))
+        found.sort(key=lambda item: item[0])
+
+        for _, (entries, status) in found:
+            if status >= 400:
+                continue
+            properties = {}
+            for key, value in entries[:MAX_STATIC_RESPONSE_FIELDS]:
+                properties[key] = _static_value_type(value)
+            if not properties:
+                continue
+            if list(properties.keys()) == ["error"]:      # looks like an error reply
+                continue
+            # "_source" lets the server replace this guess with a real runtime reply later
+            return {"type": "object", "properties": properties, "_source": "static"}
+    except Exception:
+        pass
+    return None
+
+
+class _ScopedHandler:
+    """A handler function together with the HTTP method it was resolved for."""
+    def __init__(self, fn, method):
+        self.fn = fn
+        self.method = method
+
+
+def _method_test(test):
+    """If this condition checks the request's HTTP method, returns (set of methods, is_negated); else None."""
+    if not isinstance(test, ast.Compare) or len(test.ops) != 1 or len(test.comparators) != 1:
+        return None
+    left = test.left
+    if (isinstance(left, ast.Call) and isinstance(left.func, ast.Attribute)
+            and left.func.attr in ("upper", "lower") and not left.args):
+        left = left.func.value
+    # any name or attribute that holds the request method (request.method, method, http_method, ...)
+    is_method = (isinstance(left, ast.Attribute) and "method" in left.attr.lower()) or (
+        isinstance(left, ast.Name) and "method" in left.id.lower())
+    if not is_method:
+        return None
+    right = test.comparators[0]
+    if isinstance(right, ast.Constant) and isinstance(right.value, str):
+        values = [right.value]
+    elif isinstance(right, (ast.Tuple, ast.List, ast.Set)) and all(
+            isinstance(e, ast.Constant) and isinstance(e.value, str) for e in right.elts):
+        values = [e.value for e in right.elts]
+    else:
+        return None
+    # only real HTTP method names count (ignores things like payment_method == "card")
+    if not values or not all(
+        v.upper() in ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS") for v in values
+    ):
+        return None
+    op = test.ops[0]
+    if isinstance(op, (ast.Eq, ast.In)):
+        negated = False
+    elif isinstance(op, (ast.NotEq, ast.NotIn)):
+        negated = True
+    else:
+        return None
+    return {v.upper() for v in values}, negated
+
+
+def _isolate_method_code(stmts, method, tail=()):
+    """Returns the statements that run for one HTTP method (None if no method check is found here)."""
+    for idx, stmt in enumerate(stmts):
+        if not isinstance(stmt, ast.If):
+            continue
+        info = _method_test(stmt.test)
+        if not info:
+            continue
+        methods, negated = info
+        if (method in methods) != negated:
+            return list(stmt.body)                       # this branch belongs to our method
+        after = list(stmts[idx + 1:]) + list(tail)       # code that runs when the branch is skipped
+        if stmt.orelse:
+            deeper = _isolate_method_code(stmt.orelse, method, after)
+            return deeper if deeper is not None else list(stmt.orelse) + after
+        deeper = _isolate_method_code(after, method)
+        return deeper if deeper is not None else after
+    return None
+
+
+def _scope_to_method(func_node, method):
+    """Narrows a handler to the code for one HTTP method. Returns the whole handler when it never checks
+    the method, and None (no guess) when it checks the method in a way we cannot follow."""
+    if not method:
+        return func_node
+    has_check = any(isinstance(n, ast.Compare) and _method_test(n) for n in ast.walk(func_node))
+    if not has_check:
+        return func_node
+    stmts = _isolate_method_code(func_node.body, method.upper())
+    if stmts is None:
+        return None
+    return ast.Module(body=stmts, type_ignores=[])
+
+
+def _resolve_view_handler(callback, method):
+    """Finds the actual function that handles one HTTP method (function, class-based view, ViewSet)."""
+    if callback is None:
+        return None
+    m = method.lower()
+    cls = getattr(callback, "view_class", None) or getattr(callback, "cls", None)
+    if cls is None and inspect.isclass(callback):
+        cls = callback
+    if cls is not None:
+        actions = getattr(callback, "actions", None)
+        name = actions.get(m, m) if isinstance(actions, dict) else m
+        return getattr(cls, name, None)
+    return _ScopedHandler(callback, method)   # plain function: remember which method it was resolved for
+
+
+def extract_static_response_from_callable(fn, method=None):
+    """For live apps: reads a handler function's source and looks for a written-out reply."""
+    try:
+        if isinstance(fn, _ScopedHandler):
+            fn, method = fn.fn, fn.method
+        if fn is None:
+            return None
+        fn = inspect.unwrap(fn)
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        if tree.body and isinstance(tree.body[0], (ast.FunctionDef, ast.AsyncFunctionDef)):
+            scoped = _scope_to_method(tree.body[0], method)
+            return extract_response_from_ast(scoped) if scoped is not None else None
+    except Exception:
+        pass
+    return None
+
+
+def parse_source_tree(content):
+    try:
+        return ast.parse(content)
+    except Exception:
+        return None
+
+
+def extract_static_response_at(tree, content, char_index, method=None):
+    """For file scans: finds the function that owns the route written at this position in the file."""
+    try:
+        if tree is None:
+            return None
+        line = content.count("\n", 0, char_index) + 1
+        owners = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                start = min([d.lineno for d in node.decorator_list] or [node.lineno])
+                end = getattr(node, "end_lineno", None)
+                if end and start <= line <= end:
+                    owners.append((start, node))
+        if not owners:
+            return None
+        scoped = _scope_to_method(max(owners, key=lambda o: o[0])[1], method)   # innermost function
+        return extract_response_from_ast(scoped) if scoped is not None else None
+    except Exception:
+        return None
+
+
+def _schema_has_fields(schema):
+    if not schema:
+        return False
+    if schema.get("type") == "array":
+        return _schema_has_fields(schema.get("items"))
+    return bool(schema.get("properties"))
+
+
+def _simplify_json_schema(schema, defs, depth=0):
+    """Flattens a pydantic JSON schema into the same simple shape the runtime capture produces."""
+    if not isinstance(schema, dict) or depth > 4:
+        return {"type": "object"}
+    if "$ref" in schema:
+        target = defs.get(schema["$ref"].split("/")[-1])
+        return _simplify_json_schema(target, defs, depth + 1) if target else {"type": "object"}
+    for key in ("anyOf", "oneOf", "allOf"):
+        if key in schema:
+            options = [s for s in schema[key] if not (isinstance(s, dict) and s.get("type") == "null")]
+            return _simplify_json_schema(options[0], defs, depth + 1) if options else {"type": "string"}
+    t = schema.get("type")
+    if t == "object" or "properties" in schema:
+        props = {}
+        for k, v in list(schema.get("properties", {}).items())[:MAX_STATIC_RESPONSE_FIELDS]:
+            props[k] = _simplify_json_schema(v, defs, depth + 1)
+        return {"type": "object", "properties": props} if props else {"type": "object"}
+    if t == "array":
+        return {"type": "array", "items": _simplify_json_schema(schema.get("items", {}), defs, depth + 1)}
+    if t in ("string", "integer", "number", "boolean"):
+        return {"type": t}
+    return {"type": "string"}
+
+
+def extract_fastapi_response_schema(route):
+    """FastAPI declares its reply shape (response_model / return type) — use it directly."""
+    try:
+        model = getattr(route, "response_model", None)
+        if model is None:
+            return None
+        schema = None
+        if hasattr(model, "model_json_schema"):
+            schema = model.model_json_schema()
+        else:
+            try:
+                from pydantic import TypeAdapter
+                schema = TypeAdapter(model).json_schema()
+            except Exception:
+                if hasattr(model, "schema"):
+                    schema = model.schema()
+        if not schema:
+            return None
+        defs = schema.get("$defs") or schema.get("definitions") or {}
+        simplified = _simplify_json_schema(schema, defs, 0)
+        if not _schema_has_fields(simplified):
+            return None
+        simplified["_source"] = "static"
+        return simplified
+    except Exception:
+        return None

@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="botversion-sdk",
-    version="2.0.0",
+    version="2.2.2",
     description="BotVersion SDK — automatically discover and register your API endpoints",
     long_description=open("README.md").read() if __import__("os").path.exists("README.md") else "",
     long_description_content_type="text/markdown",
@@ -12,9 +12,19 @@ setup(
     packages=find_packages(),
     python_requires=">=3.7",
 
-    # No required dependencies — works with stdlib only.
-    # FastAPI, Flask, Django are optional — detected at runtime.
-    install_requires=[],
+    entry_points={
+        "console_scripts": [
+            "botversion-scan-endpoints=botversion_sdk.bin.scan_endpoints:main",
+        ],
+    },
+
+    # python-dotenv is the only hard dependency, used to auto-load .env /
+    # .env.local for the build-time CLI scanner (see bin/scan_endpoints.py).
+    # FastAPI, Flask, Django, etc. are optional — detected at runtime, not
+    # required to install the SDK itself.
+    install_requires=[
+        "python-dotenv>=1.0.0",
+    ],
 
     extras_require={
         "fastapi": ["fastapi", "starlette"],

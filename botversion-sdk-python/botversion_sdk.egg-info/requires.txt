@@ -1,0 +1,11 @@
+python-dotenv>=1.0.0
+
+[django]
+django
+
+[fastapi]
+fastapi
+starlette
+
+[flask]
+flask

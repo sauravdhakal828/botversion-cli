@@ -158,7 +158,7 @@ def init(app=None, api_key=None, **options):
 
     _client = BotVersionClient({
         "api_key": api_key,
-        "platform_url": options.get("platform_url", "https://botversion.com"),
+        "platform_url": options.get("platform_url", "https://console.botversion.com"),
         "debug": debug,
         "timeout": options.get("timeout", 30),
         "flush_delay": options.get("flush_delay", 3),

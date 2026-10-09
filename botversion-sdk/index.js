@@ -226,6 +226,9 @@ function runFullScan(
   if (shouldScanBackend) {
     var endpoints = runBackendScanner(detectedBackend, app, options, cwd);
     result.endpointCount = endpoints.length;
+    endpoints.filter(function (e) {
+      return e.method === "GET" || e.method === "DELETE";
+    });
 
     if (endpoints.length > 0) {
       client.registerEndpoints(endpoints);

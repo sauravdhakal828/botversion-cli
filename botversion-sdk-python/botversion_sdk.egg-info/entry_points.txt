@@ -1,0 +1,2 @@
+[console_scripts]
+botversion-scan-endpoints = botversion_sdk.bin.scan_endpoints:main
